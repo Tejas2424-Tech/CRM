@@ -1,0 +1,31 @@
+import { Router } from "express";
+import { adminRouter } from "./admin.js";
+import { analyticsRouter } from "./analytics.js";
+import { authRouter } from "./auth.js";
+import { campaignsRouter } from "./campaigns.js";
+import { conversationsRouter } from "./conversations.js";
+import { leadsRouter } from "./leads.js";
+import { messagesRouter } from "./messages.js";
+import { templatesRouter } from "./templates.js";
+import { tasksRouter } from "./tasks.js";
+import { usersRouter } from "./users.js";
+import { webhookRouter } from "./webhook.js";
+import { whatsappRouter } from "./whatsapp.js";
+import { debugRouter } from "./debug.js";
+
+export const routes = Router();
+
+routes.get("/health", (_req, res) => res.json({ ok: true }));
+routes.use("/auth", authRouter);
+routes.use("/api/leads", leadsRouter);
+routes.use("/api/conversations", conversationsRouter);
+routes.use("/api/messages", messagesRouter);
+routes.use("/api/templates", templatesRouter);
+routes.use("/api/campaigns", campaignsRouter);
+routes.use("/api/analytics", analyticsRouter);
+routes.use("/api/tasks", tasksRouter);
+routes.use("/api/users", usersRouter);
+routes.use("/webhook", webhookRouter);
+routes.use("/api/whatsapp", whatsappRouter);
+routes.use("/api/admin", adminRouter);
+routes.use("/api/debug", debugRouter);

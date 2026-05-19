@@ -1,0 +1,23 @@
+{
+  "name": "messaging-crm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev:api\" \"npm run worker\" \"npm run dev:web\"",
+    "dev:api": "npm --workspace @crm/api run dev",
+    "dev:web": "npm --workspace @crm/web run dev",
+    "worker": "npm --workspace @crm/api run worker",
+    "build": "npm run build --workspaces",
+    "test": "npm --workspace @crm/api run test",
+    "lint": "npm run lint --workspaces"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "typescript": "^5.9.3"
+  }
+}

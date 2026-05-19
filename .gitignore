@@ -1,0 +1,11 @@
+node_modules
+dist
+.env
+.DS_Store
+coverage
+*.log
+*.tsbuildinfo
+
+# whatsapp-web.js session storage (contains auth tokens — never commit)
+apps/api/src/sessions/
+!apps/api/src/sessions/.gitkeep
