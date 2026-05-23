@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
+import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import jwt from "jsonwebtoken";
@@ -30,8 +31,23 @@ let mongoProcess: ChildProcess;
 let mongoDir: string;
 const app = createApp();
 
+async function getFreePort() {
+  return new Promise<number>((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.on("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      server.close(() => {
+        if (address && typeof address === "object") resolve(address.port);
+        else reject(new Error("Could not allocate test port"));
+      });
+    });
+  });
+}
+
 beforeAll(async () => {
-  const port = 27028;
+  const port = await getFreePort();
   mongoDir = await mkdtemp(join(tmpdir(), "crm-mongo-"));
   mongoProcess = spawn("mongod", ["--dbpath", mongoDir, "--port", String(port), "--quiet"], {
     stdio: "ignore"
@@ -54,7 +70,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await mongoose.disconnect();
   mongoProcess?.kill();
-  if (mongoDir) await rm(mongoDir, { recursive: true, force: true });
+  if (mongoDir) await rm(mongoDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 });
 
 beforeEach(async () => {

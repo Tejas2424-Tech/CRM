@@ -7,9 +7,22 @@ import { audit } from "../services/audit.js";
 
 export const authRouter = Router();
 
-authRouter.get("/dev-users", async (_req, res) => {
-  const users = await User.find({ active: true }).sort({ role: 1 });
-  res.json(users.map(serializeUser));
+authRouter.get("/dev-users", async (_req, res, next) => {
+  try {
+    const timeout = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("Database timeout")), 5000)
+    );
+    const users = await Promise.race([
+      User.find({ active: true }).sort({ role: 1 }),
+      timeout
+    ]);
+    res.json(users.map(serializeUser));
+  } catch (err: any) {
+    if (err.message === "Database timeout") {
+      return res.status(503).json({ error: "Service unavailable (Database timeout)" });
+    }
+    next(err);
+  }
 });
 
 authRouter.post("/dev-login", async (req, res) => {

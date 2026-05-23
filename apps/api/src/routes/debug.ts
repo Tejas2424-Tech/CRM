@@ -9,11 +9,20 @@ debugRouter.get("/dump", async (req, res) => {
     const chats = await client.getChats();
     for (const c of chats) {
       if (c.id._serialized.includes("@lid")) {
-         const contact = await c.getContact();
-         return res.json({
-           chatId: c.id._serialized,
-           contact: contact
-         });
+         try {
+           const contact = await c.getContact();
+           return res.json({
+             chatId: c.id._serialized,
+             contact: contact
+           });
+         } catch (err: any) {
+           const errMsg = String(err?.message || err);
+           if (errMsg.includes("detached Frame") || errMsg.includes("Execution context was destroyed")) {
+             console.warn(`[Debug] Frame reloaded while fetching ${c.id._serialized}`);
+             continue;
+           }
+           throw err;
+         }
       }
     }
     res.json({ error: "no lid chats found" });

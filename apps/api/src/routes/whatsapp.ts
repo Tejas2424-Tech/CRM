@@ -15,17 +15,14 @@ import { requireAuth } from "../auth/auth.js";
 import { Lead } from "../models/Lead.js";
 import { Message } from "../models/Message.js";
 import { outboundQueue } from "../queues/jobs.js";
+import { redisConnection } from "../queues/connection.js";
 import { emitRealtime } from "../config/realtime.js";
 import { serializeMessage } from "../services/serializers.js";
 import { env } from "../config/env.js";
 import {
-  getWajsStatus,
-  getWajsQr,
-  getWajsClient,
-  getWajsMetadata,
-  logoutWhatsApp
+  getWajsMetadataSnapshot,
+  getWajsQrSnapshot
 } from "../services/whatsappWebjs.service.js";
-import { syncAllChats } from "../services/chatSync.service.js";
 
 export const whatsappRouter = Router();
 
@@ -33,20 +30,20 @@ export const whatsappRouter = Router();
 whatsappRouter.use(requireAuth);
 
 // ─── GET /api/whatsapp/status ─────────────────────────────────────────────────
-whatsappRouter.get("/status", (_req, res) => {
+whatsappRouter.get("/status", async (_req, res) => {
   if (env.WA_CLIENT_MODE !== "webjs") {
     return res.json({ mode: env.WA_CLIENT_MODE, status: "NOT_APPLICABLE" });
   }
-  const metadata = getWajsMetadata();
+  const metadata = await getWajsMetadataSnapshot();
   return res.json({ mode: "webjs", ...metadata });
 });
 
 // ─── GET /api/whatsapp/qr ─────────────────────────────────────────────────────
-whatsappRouter.get("/qr", (_req, res) => {
+whatsappRouter.get("/qr", async (_req, res) => {
   if (env.WA_CLIENT_MODE !== "webjs") {
     return res.status(400).json({ error: "whatsapp-web.js mode not active" });
   }
-  const qr = getWajsQr();
+  const qr = await getWajsQrSnapshot();
   if (!qr) {
     return res.status(404).json({ error: "No QR available — session may already be active" });
   }
@@ -78,7 +75,7 @@ whatsappRouter.post("/send", async (req, res) => {
     timestamp: new Date()
   });
 
-  await outboundQueue.add("whatsapp-send", { messageId: msg._id.toString() });
+  await outboundQueue.add("whatsapp-send", { messageId: msg._id.toString() }, { jobId: `outbound_${msg._id.toString()}` });
   emitRealtime("message:new", serializeMessage(msg));
 
   return res.json({ success: true, message: serializeMessage(msg) });
@@ -100,19 +97,16 @@ whatsappRouter.post("/sync", async (_req, res) => {
     return res.status(400).json({ error: "Sync only available in webjs mode" });
   }
 
-  if (getWajsStatus() !== "CONNECTED") {
+  const metadata = await getWajsMetadataSnapshot();
+  if (metadata.status !== "CONNECTED") {
     return res.status(409).json({
       error: "WhatsApp client not connected",
-      status: getWajsStatus()
+      status: metadata.status
     });
   }
 
   try {
-    const client = getWajsClient();
-    // Fire-and-forget — sync runs async, progress is pushed via Socket.IO
-    syncAllChats(client as any).catch((err) =>
-      console.error("[API] Manual syncAllChats failed:", err)
-    );
+    await redisConnection.publish("wajs:commands", JSON.stringify({ action: "sync" }));
     return res.status(202).json({ message: "Sync started — watch sync:progress events" });
   } catch (err: any) {
     return res.status(503).json({ error: err.message });
@@ -139,7 +133,7 @@ whatsappRouter.post("/logout", async (_req, res) => {
   }
 
   // Allow logout even if status is DISCONNECTED (cleans up stale sessions)
-  const currentStatus = getWajsStatus();
+  const currentStatus = (await getWajsMetadataSnapshot()).status;
   if (currentStatus === "INITIALISING") {
     return res.status(409).json({
       error: "Client is still initialising — please wait",
@@ -147,10 +141,7 @@ whatsappRouter.post("/logout", async (_req, res) => {
     });
   }
 
-  // Fire-and-forget — the async flow emits Socket.IO events as it progresses
-  logoutWhatsApp().catch((err) =>
-    console.error("[API] logoutWhatsApp failed:", err)
-  );
+  await redisConnection.publish("wajs:commands", JSON.stringify({ action: "logout" }));
 
   return res.status(202).json({
     message: "Logout initiated — watch wajs:logout and wajs:qr socket events"

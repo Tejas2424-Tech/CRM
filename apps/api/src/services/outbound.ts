@@ -22,10 +22,16 @@ function isRetryableError(err: any): boolean {
 export async function sendOutboundMessage(messageId: string, attemptsMade: number = 0) {
   console.log(`[Outbound] [Step 1] Worker job received for messageId: ${messageId} (Attempt: ${attemptsMade})`);
   const message = await Message.findById(messageId);
-  if (!message) throw new Error("Message not found");
+  if (!message) {
+    console.warn(`[Outbound] Orphaned job discarded: Message ${messageId} no longer exists in DB.`);
+    return;
+  }
 
   const lead = await Lead.findById(message.leadId);
-  if (!lead) throw new Error("Lead not found");
+  if (!lead) {
+    console.warn(`[Outbound] Orphaned job discarded: Lead not found for message ${messageId}.`);
+    return;
+  }
 
   // ── Connection Gating ──────────────────────────────────────────────────────
   try {
@@ -108,9 +114,15 @@ export async function sendOutboundMessage(messageId: string, attemptsMade: numbe
 
 export async function sendCampaignRecipient(campaignId: string, recipientId: string) {
   const recipient = await CampaignRecipient.findById(recipientId);
-  if (!recipient) throw new Error("Campaign recipient not found");
+  if (!recipient) {
+    console.warn(`[Outbound] Orphaned job discarded: Campaign recipient ${recipientId} no longer exists.`);
+    return;
+  }
   const lead = await Lead.findById(recipient.leadId);
-  if (!lead) throw new Error("Lead not found");
+  if (!lead) {
+    console.warn(`[Outbound] Orphaned job discarded: Lead not found for recipient ${recipientId}.`);
+    return;
+  }
 
   if (!lead.consent.optedIn) {
     recipient.status = "failed";
@@ -134,16 +146,31 @@ export async function sendCampaignRecipient(campaignId: string, recipientId: str
   recipient.waMessageId = result.waMessageId;
   await recipient.save();
 
-  const message = await Message.create({
-    leadId: lead._id,
-    direction: "out",
-    type: "template",
-    templateId: template._id,
-    content: template.body,
-    status: "sent",
-    waMessageId: result.waMessageId,
-    timestamp: new Date()
-  });
+  let message;
+  try {
+    await Message.updateOne(
+      { waMessageId: result.waMessageId },
+      {
+        $setOnInsert: {
+          leadId: lead._id,
+          direction: "out",
+          type: "template",
+          templateId: template._id,
+          content: template.body,
+          status: "sent",
+          waMessageId: result.waMessageId,
+          timestamp: new Date()
+        }
+      },
+      { upsert: true }
+    );
+    message = await Message.findOne({ waMessageId: result.waMessageId });
+  } catch (err: any) {
+    if (err?.code !== 11000) throw err;
+    message = await Message.findOne({ waMessageId: result.waMessageId });
+  }
+  
+  if (!message) throw new Error("Failed to insert campaign message silently");
 
   await Conversation.updateOne(
     { leadId: lead._id },

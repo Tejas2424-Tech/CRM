@@ -23,6 +23,8 @@ import { Conversation } from "../models/Conversation.js";
 import { Lead } from "../models/Lead.js";
 import { Message } from "../models/Message.js";
 import { serializeLead, serializeMessage } from "./serializers.js";
+import { redisConnection } from "../queues/connection.js";
+import { normalizePhone } from "../utils/phone.js";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -42,6 +44,7 @@ const INTER_CHAT_DELAY_MS = 200;
  *  singleton and ready for multi-session/multi-adapter work. */
 export interface IWajsClient {
   getChats(): Promise<WajsChat[]>;
+  getState(): Promise<string>;
 }
 
 export interface WajsChat {
@@ -76,11 +79,6 @@ export interface WajsMessage {
 }
 
 // ─── Normalise helpers ────────────────────────────────────────────────────────
-
-function normalisePhone(raw: string): string {
-  const digits = raw.replace(/@c\.us$/, "").replace(/[^0-9]/g, "");
-  return `+${digits}`;
-}
 
 /**
  * Build the display name from the richest available source.
@@ -134,7 +132,7 @@ export async function syncContact(
   contact: WajsContact,
   overrides: { unreadCount?: number; lastMessageAt?: Date } = {}
 ) {
-  const phone = contact.number ? `+${contact.number}` : normalisePhone(chatId);
+  const phone = contact.number ? normalizePhone(contact.number) : normalizePhone(chatId);
   const pushName = contact.pushname?.trim() || contact.shortName?.trim() || undefined;
   // Only use contact.name when it is a real saved name (not just the pushname echo)
   const savedName = contact.isMyContact
@@ -242,9 +240,27 @@ export async function syncAllChats(
   client: IWajsClient,
   opts: { messageLimit?: number } = {}
 ) {
+  // Try to acquire distributed lock for 5 minutes
+  const lock = await redisConnection.set("sync_lock:whatsapp", "locked", "EX", 300, "NX");
+  if (!lock) {
+    console.warn("[ChatSync] Sync aborted — another sync is currently running (lock active).");
+    return;
+  }
+
   const msgLimit = opts.messageLimit ?? INITIAL_MSG_LIMIT;
   console.log("[ChatSync] Starting full chat sync…");
   emitRealtime("sync:started", { at: new Date().toISOString() });
+
+  try {
+    const state = await client.getState();
+    if (state !== "CONNECTED") {
+      console.log("[ChatSync] Client not stable yet (state: " + state + "). Aborting sync.");
+      await redisConnection.del("sync_lock:whatsapp");
+      return;
+    }
+  } catch (err) {
+    console.warn("[ChatSync] Could not fetch client state:", err);
+  }
 
   let chats: WajsChat[] = [];
   try {
@@ -252,6 +268,7 @@ export async function syncAllChats(
   } catch (err) {
     console.error("[ChatSync] getChats() failed — aborting sync:", err);
     emitRealtime("sync:error", { error: String(err) });
+    await redisConnection.del("sync_lock:whatsapp");
     return;
   }
 
@@ -274,19 +291,29 @@ export async function syncAllChats(
 
   for (const chat of privateChats) {
     try {
-      // ── 1. Resolve contact ──────────────────────────────────────────────
-      let contact: WajsContact;
-      try {
-        contact = await chat.getContact();
-      } catch (err) {
-        console.warn(`[ChatSync] getContact() failed for ${chat.id._serialized}:`, err);
-        continue; // Skip this chat — cannot resolve contact identity
+      // ── 1. Resolve contact (Lightweight) ────────────────────────────────
+      const contactId = chat.id?._serialized;
+
+      if (contactId && contactId.endsWith("@lid")) {
+        console.log(`[ChatSync] Skipping unstable @lid contact: ${contactId}`);
+        continue;
       }
+
+      const cAny = chat as any;
+      const pushName = cAny.pushname || cAny.formattedTitle;
+
+      const contact: WajsContact = {
+        number: contactId ? contactId.split('@')[0] : "unknown",
+        pushname: pushName,
+        name: chat.name,
+        isMyContact: false,
+        getProfilePicUrl: async () => undefined
+      };
 
       const lastMessageAt = chat.timestamp ? new Date(chat.timestamp * 1000) : new Date();
 
       // ── 2. Upsert lead/contact ──────────────────────────────────────────
-      const lead = await syncContact(chat.id._serialized, contact, {
+      const lead = await syncContact(contactId || "unknown", contact, {
         unreadCount: chat.unreadCount ?? 0,
         lastMessageAt,
       });
@@ -368,6 +395,8 @@ export async function syncAllChats(
   console.log(
     `[ChatSync] ✅ Sync complete — ${done}/${privateChats.length} chats, ${errors.length} errors`
   );
+
+  await redisConnection.del("sync_lock:whatsapp");
 
   emitRealtime("sync:complete", {
     total: privateChats.length,

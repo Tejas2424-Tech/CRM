@@ -1,4 +1,4 @@
-import type { AgentDTO, LeadDTO, LeadStatus } from "@crm/shared";
+import type { AgentDTO, LeadDTO, LeadStatus, MessageDTO } from "@crm/shared";
 
 export const stages: LeadStatus[] = ["new", "contacted", "interested", "followup", "won", "lost"];
 
@@ -45,4 +45,46 @@ export function windowText(lead: LeadDTO) {
   return expires > new Date()
     ? `Reply window open until ${expires.toLocaleTimeString()}`
     : "Window closed - use template";
+}
+
+export function messageIdentity(message: MessageDTO) {
+  return message.id || message.waMessageId || [
+    message.leadId,
+    message.direction,
+    message.timestamp,
+    message.text ?? message.type
+  ].join(":");
+}
+
+export function messageRenderKey(message: MessageDTO, index: number) {
+  return `${messageIdentity(message)}:${index}`;
+}
+
+/**
+ * Merge messages without duplicating optimistic/API/socket copies.
+ * Later arrays win so status updates replace queued placeholders.
+ */
+export function mergeUniqueMessages(existing: MessageDTO[], incoming: MessageDTO[]): MessageDTO[] {
+  const map = new Map<string, MessageDTO>();
+  const add = (msg: MessageDTO, source: "existing" | "incoming") => {
+    const key = messageIdentity(msg);
+    if (!key) {
+      console.warn("[Messages] Dropping message without stable identity", { source, msg });
+      return;
+    }
+    map.set(key, msg);
+  };
+
+  existing.forEach((msg) => add(msg, "existing"));
+  incoming.forEach((msg) => add(msg, "incoming"));
+
+  return Array.from(map.values()).sort(
+    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+  );
+}
+
+export function uniqueById<T extends { id: string }>(items: T[]): T[] {
+  const map = new Map<string, T>();
+  for (const item of items) map.set(item.id, item);
+  return Array.from(map.values());
 }

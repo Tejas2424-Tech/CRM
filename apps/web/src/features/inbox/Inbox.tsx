@@ -1,7 +1,7 @@
 import type { AgentDTO, LeadDTO, LeadStatus, MessageDTO, NoteDTO, TaskDTO } from "@crm/shared";
 import { Check, Search, Send } from "lucide-react";
 import { Empty, LeadAvatar, LeadNameBlock, MessageBubble, SectionTitle, agentName, formatPhone, stageLabels, windowText } from "../../components";
-import { stages } from "../../utils";
+import { mergeUniqueMessages, messageRenderKey, stages, uniqueById } from "../../utils";
 
 interface FilterState {
   search: string;
@@ -12,7 +12,7 @@ interface FilterState {
 }
 
 interface Props {
-  waStatus: string;
+  waStatus: "ready" | "busy" | "offline" | "unknown";
   leads: LeadDTO[];
   selectedLead?: LeadDTO;
   selectedLeadId?: string;
@@ -61,7 +61,7 @@ export function Inbox(props: Props) {
           </div>
         </div>
         <div className="lead-list">
-          {props.leads.map((item) => (
+          {uniqueById(props.leads).map((item) => (
             <button key={item.id} className={`lead-row ${item.id === props.selectedLeadId ? "active" : ""}`} onClick={() => props.setSelectedLeadId(item.id)}>
               <LeadAvatar lead={item} size={36} />
               <span className="lead-main">
@@ -99,24 +99,37 @@ export function Inbox(props: Props) {
             </header>
 
             <div className="messages">
-              {props.messages.map((msg) => <MessageBubble key={msg.id} message={msg} />)}
-              {!props.messages.length && <Empty text="No messages in this conversation yet." />}
+              {(() => {
+                // Final defensive dedup in render — ensures React never sees duplicate keys
+                // even during transient state between optimistic update and server confirmation
+                const deduped = mergeUniqueMessages([], props.messages);
+                return deduped.length
+                  ? deduped.map((msg, index) => <MessageBubble key={messageRenderKey(msg, index)} message={msg} />)
+                  : <Empty text="No messages in this conversation yet." />;
+              })()}
             </div>
 
             <footer className="composer" style={{ flexWrap: "wrap" }}>
-              {props.waStatus !== "CONNECTED" && (
-                <div style={{ width: "100%", padding: "4px 10px", color: props.waStatus === "FAILED" ? "#ef4444" : "#d97706", fontSize: 12, background: props.waStatus === "FAILED" ? "#fee2e2" : "#fef3c7", borderRadius: 4, marginBottom: 8, display: "flex", alignItems: "center" }}>
-                  ⚠️ WhatsApp is {({ HYDRATING: "hydrating", SYNCING: "syncing history", AUTHENTICATING: "authenticating", INITIALISING: "initialising", DISCONNECTED: "reconnecting", FAILED: "failed" } as Record<string, string>)[props.waStatus] ?? "unavailable"}. Messages will be gated until connected.
+              {props.waStatus !== "ready" && (
+                <div style={{
+                  width: "100%", padding: "4px 10px", fontSize: 12, borderRadius: 4, marginBottom: 8,
+                  display: "flex", alignItems: "center",
+                  color: props.waStatus === "offline" ? "#ef4444" : "#d97706",
+                  background: props.waStatus === "offline" ? "#fee2e2" : "#fef3c7"
+                }}>
+                  {props.waStatus === "busy" && "⏳ WhatsApp is connecting — messages will be queued automatically."}
+                  {props.waStatus === "offline" && "⚠️ WhatsApp is disconnected — messages will be queued and retried when reconnected."}
+                  {props.waStatus === "unknown" && "ℹ️ WhatsApp status unknown — messages will be queued automatically."}
                 </div>
               )}
               <input
                 className="input"
-                placeholder={props.waStatus === "CONNECTED" ? "Reply from CRM" : `WhatsApp ${props.waStatus.toLowerCase()}…`}
+                placeholder={props.waStatus === "ready" ? "Reply from CRM" : "Message will be queued until connected…"}
                 value={props.reply}
                 onChange={(e) => props.setReply(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && props.waStatus === "CONNECTED" && props.sendReply()}
+                onKeyDown={(e) => e.key === "Enter" && props.sendReply()}
               />
-              <button className="primary-button" onClick={props.sendReply} disabled={props.waStatus !== "CONNECTED"}>
+              <button className="primary-button" onClick={props.sendReply}>
                 <Send size={16} /> Send
               </button>
             </footer>
@@ -148,7 +161,7 @@ export function Inbox(props: Props) {
               <button className="secondary-button" onClick={props.createNote}>Add note</button>
             </div>
             <div className="timeline">
-              {props.notes.map((note) => <p key={note.id}>{note.body}<small>{new Date(note.createdAt).toLocaleString()}</small></p>)}
+              {uniqueById(props.notes).map((note) => <p key={note.id}>{note.body}<small>{new Date(note.createdAt).toLocaleString()}</small></p>)}
             </div>
 
             <SectionTitle title="Follow-up" />
@@ -156,7 +169,7 @@ export function Inbox(props: Props) {
             <input className="input" type="datetime-local" value={props.taskForm.dueAt} onChange={(e) => props.setTaskForm({ ...props.taskForm, dueAt: e.target.value })} />
             <button className="secondary-button" onClick={props.createTask}>Set reminder</button>
             <div className="timeline">
-              {props.tasks.map((task) => <p key={task.id}>{task.title}<small>{new Date(task.dueAt).toLocaleString()} - {task.status}</small></p>)}
+              {uniqueById(props.tasks).map((task) => <p key={task.id}>{task.title}<small>{new Date(task.dueAt).toLocaleString()} - {task.status}</small></p>)}
             </div>
           </>
         ) : <Empty text="Lead details appear here." />}

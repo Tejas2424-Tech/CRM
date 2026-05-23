@@ -21,31 +21,43 @@ const { Client, LocalAuth } = pkg;
 import qrcode from "qrcode-terminal";
 
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { env } from "../config/env.js";
 import { emitRealtime } from "../config/realtime.js";
+import { redisConnection } from "../queues/connection.js";
 import { inboundQueue } from "../queues/jobs.js";
 import { audit } from "./audit.js";
 import { syncAllChats } from "./chatSync.service.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const WA_STATUS_KEY = `wajs:${env.WA_CLIENT_ID}:status`;
+const WA_QR_KEY = `wajs:${env.WA_CLIENT_ID}:qr`;
+const WA_OWNER_LOCK_KEY = `wajs:${env.WA_CLIENT_ID}:owner`;
+const WA_OWNER_ID = `${os.hostname()}:${process.pid}`;
+const OWNER_LOCK_TTL_SECONDS = 45;
 
 // ─── Singleton state ────────────────────────────────────────────────────────
 
 let _client: InstanceType<typeof Client> | null = null;
 
 export type WajsStatus =
-  | "INITIALISING"
+  | "BOOTING"        // This process is starting up (in-memory only, never persisted to Redis)
+  | "INITIALISING"   // Puppeteer is launching / WhatsApp Web loading
   | "QR_REQUIRED"
   | "AUTHENTICATING"
   | "HYDRATING"
   | "SYNCING"
   | "CONNECTED"
   | "DISCONNECTED"
-  | "FAILED";
+  | "FAILED"
+  | "UNKNOWN";       // Redis miss or stale — state is genuinely unknown
 
-let _status: WajsStatus = "INITIALISING";
+/** Staleness threshold: if Redis state is older than this, treat as UNKNOWN */
+const STATUS_STALE_MS = 3 * 60_000; // 3 minutes
+
+let _status: WajsStatus = "BOOTING"; // Process just started — not INITIALISING yet
 let _connectedAt: Date | null = null;
 let _lastDisconnectReason: string | null = null;
 let _syncProgress = { total: 0, done: 0 };
@@ -57,14 +69,14 @@ let _qrData: string | null = null;
 let _preventReconnect = false;
 /** Guards against concurrent logout() calls */
 let _logoutInProgress = false;
+let _ownsClient = false;
+let _initPromise: Promise<void> | null = null;
+let _ownerLockRefresh: NodeJS.Timeout | null = null;
+let _heartbeatInterval: NodeJS.Timeout | null = null;
+
+import { normalizePhone } from "../utils/phone.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-/** Convert 919876543210@c.us  →  +919876543210 */
-function normalisePhone(waId: string): string {
-  const digits = waId.replace(/@c\.us$/, "").replace(/\D/g, "");
-  return `+${digits}`;
-}
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
@@ -99,6 +111,44 @@ export function getWajsMetadata() {
   };
 }
 
+export async function getWajsQrSnapshot(): Promise<string | null> {
+  if (_qrData) return _qrData;
+  return redisConnection.get(WA_QR_KEY);
+}
+
+export async function getWajsMetadataSnapshot() {
+  // If this process owns the client, use in-memory state (authoritative)
+  if (_client) return getWajsMetadata();
+
+  // If in-memory is past BOOTING, it's meaningful — return it
+  const local = getWajsMetadata();
+  if (local.status !== "BOOTING") return local;
+
+  // This process does not own the client — read from Redis cache
+  const raw = await redisConnection.get(WA_STATUS_KEY);
+  if (!raw) {
+    console.warn("[WaJS][STATUS RESOLVE] Redis miss — status UNKNOWN", { key: WA_STATUS_KEY });
+    return { ...local, status: "UNKNOWN" as WajsStatus };
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as ReturnType<typeof getWajsMetadata> & { heartbeatAt?: number };
+    // Staleness check — if no heartbeat or heartbeat is stale, return UNKNOWN
+    const heartbeatAt = parsed.heartbeatAt ?? 0;
+    if (Date.now() - heartbeatAt > STATUS_STALE_MS) {
+      console.warn("[WaJS][STATUS RESOLVE] Redis state is stale — treating as UNKNOWN", {
+        heartbeatAt: new Date(heartbeatAt).toISOString(),
+        age: `${Math.round((Date.now() - heartbeatAt) / 1000)}s`
+      });
+      return { ...local, status: "UNKNOWN" as WajsStatus };
+    }
+    console.log("[WaJS][STATUS RESOLVE] Resolved from Redis:", parsed.status);
+    return parsed;
+  } catch {
+    return { ...local, status: "UNKNOWN" as WajsStatus };
+  }
+}
+
 /**
  * Update the internal status and emit events.
  */
@@ -113,6 +163,11 @@ function updateStatus(newStatus: WajsStatus, metadata: any = {}) {
   if (newStatus === "CONNECTED") {
     _connectedAt = new Date();
     _reconnectAttempts = 0;
+    startHeartbeat(); // Keep Redis fresh while connected
+  }
+
+  if (newStatus === "DISCONNECTED" || newStatus === "FAILED") {
+    stopHeartbeat();
   }
 
   emitRealtime("wajs:status", { 
@@ -121,6 +176,109 @@ function updateStatus(newStatus: WajsStatus, metadata: any = {}) {
     connectedAt: _connectedAt,
     syncProgress: _syncProgress
   });
+
+  persistStatus(metadata).catch((err) =>
+    console.error("[WaJS][STATE] Failed to persist status:", err)
+  );
+}
+
+async function persistStatus(metadata: Record<string, unknown> = {}) {
+  // Do NOT persist BOOTING or UNKNOWN — those are transient/error states
+  if (_status === "BOOTING" || _status === "UNKNOWN") return;
+
+  await redisConnection.set(
+    WA_STATUS_KEY,
+    JSON.stringify({
+      status: _status,
+      ...metadata,
+      connectedAt: _connectedAt?.toISOString() ?? null,
+      lastDisconnectReason: _lastDisconnectReason,
+      syncProgress: _syncProgress,
+      owner: _ownsClient ? WA_OWNER_ID : undefined,
+      heartbeatAt: Date.now(), // Staleness detection field
+      updatedAt: new Date().toISOString()
+    })
+    // NO TTL — state is permanent until explicitly overwritten by a real transition
+  );
+}
+
+/** Kick off a heartbeat that refreshes the Redis state every 60s to prevent ghost-stale reads */
+function startHeartbeat() {
+  if (_heartbeatInterval) return;
+  _heartbeatInterval = setInterval(() => {
+    persistStatus().catch((err) =>
+      console.error("[WaJS][HEARTBEAT] Failed to refresh state:", err)
+    );
+  }, 60_000);
+  console.log("[WaJS] Status heartbeat started (60s interval)");
+}
+
+function stopHeartbeat() {
+  if (_heartbeatInterval) {
+    clearInterval(_heartbeatInterval);
+    _heartbeatInterval = null;
+  }
+}
+
+async function persistQr(qr: string | null) {
+  if (qr) {
+    await redisConnection.set(WA_QR_KEY, qr, "EX", 300);
+  } else {
+    await redisConnection.del(WA_QR_KEY);
+  }
+}
+
+async function acquireOwnerLock(): Promise<boolean> {
+  if (_ownsClient) return true;
+  const acquired = await redisConnection.set(WA_OWNER_LOCK_KEY, WA_OWNER_ID, "EX", OWNER_LOCK_TTL_SECONDS, "NX");
+  if (!acquired) {
+    const owner = await redisConnection.get(WA_OWNER_LOCK_KEY);
+    console.warn(`[WaJS] Another process owns WhatsApp (${owner ?? "unknown"}); skipping local init.`);
+    return false;
+  }
+
+  _ownsClient = true;
+  _ownerLockRefresh = setInterval(() => {
+    redisConnection
+      .expire(WA_OWNER_LOCK_KEY, OWNER_LOCK_TTL_SECONDS)
+      .catch((err) => console.error("[WaJS] Failed to refresh owner lock:", err));
+  }, 15_000);
+  console.log(`[WaJS] Acquired WhatsApp owner lock as ${WA_OWNER_ID}`);
+  return true;
+}
+
+async function releaseOwnerLock() {
+  if (_ownerLockRefresh) {
+    clearInterval(_ownerLockRefresh);
+    _ownerLockRefresh = null;
+  }
+  if (!_ownsClient) return;
+  const owner = await redisConnection.get(WA_OWNER_LOCK_KEY);
+  if (owner === WA_OWNER_ID) {
+    await redisConnection.del(WA_OWNER_LOCK_KEY);
+  }
+  _ownsClient = false;
+}
+
+function getSessionDir(sessionPath: string) {
+  return path.join(sessionPath, `session-${env.WA_CLIENT_ID}`);
+}
+
+async function cleanupStaleBrowserLocks(sessionPath: string) {
+  const lockFiles = [
+    path.join(getSessionDir(sessionPath), "SingletonLock"),
+    path.join(getSessionDir(sessionPath), "SingletonCookie"),
+    path.join(getSessionDir(sessionPath), "SingletonSocket")
+  ];
+
+  for (const file of lockFiles) {
+    try {
+      await fs.rm(file, { force: true });
+      console.warn(`[WaJS] Removed stale Chromium lock file: ${file}`);
+    } catch {
+      // best-effort only
+    }
+  }
 }
 
 /**
@@ -153,6 +311,8 @@ export async function waitForWhatsAppReady(timeoutMs = 60000): Promise<void> {
 
 /** Gracefully shut down the client to prevent zombie browser processes. */
 export async function destroyWajsClient(): Promise<void> {
+  _preventReconnect = true;
+  stopHeartbeat();
   if (_client) {
     try {
       console.log("[WaJS] Destroying client for shutdown...");
@@ -163,6 +323,10 @@ export async function destroyWajsClient(): Promise<void> {
     _client = null;
     _status = "DISCONNECTED";
   }
+  _qrData = null;
+  await persistQr(null).catch(() => undefined);
+  await releaseOwnerLock().catch((err) => console.error("[WaJS] Failed to release owner lock:", err));
+  await persistStatus().catch(() => undefined);
 }
 
 /**
@@ -186,7 +350,7 @@ export async function logoutWhatsApp(): Promise<void> {
   _preventReconnect = true; // Block auto-reconnect during cleanup
 
   const sessionPath = path.resolve(__dirname, "../..", env.WA_SESSION_PATH);
-  const sessionDir = path.join(sessionPath, `session-${env.WA_CLIENT_ID}`);
+  const sessionDir = getSessionDir(sessionPath);
 
   try {
     // Step 1: Revoke session on the connected phone (best-effort)
@@ -213,6 +377,7 @@ export async function logoutWhatsApp(): Promise<void> {
     _client = null;
     _qrData = null;
     _status = "DISCONNECTED";
+    await persistQr(null).catch(() => undefined);
 
     // Step 4: Delete the session directory so the next init shows a fresh QR
     try {
@@ -225,6 +390,7 @@ export async function logoutWhatsApp(): Promise<void> {
     // Step 5: Notify all connected frontends
     emitRealtime("wajs:logout", { at: new Date().toISOString() });
     emitRealtime("wajs:status", { status: _status });
+    await persistStatus();
 
     console.log("[WaJS] ✅ Logout complete — re-initialising for fresh QR in 1s…");
 
@@ -248,13 +414,25 @@ export async function logoutWhatsApp(): Promise<void> {
 
 /** Bootstrap the client. Must be called after Socket.IO is ready. */
 export async function initWhatsappWebjs(): Promise<void> {
+  if (_initPromise) return _initPromise;
   if (_client) {
     console.log("[WaJS] Client already initialised — skipping.");
     return;
   }
 
-  const sessionPath = path.resolve(__dirname, "../..", env.WA_SESSION_PATH);
+  _initPromise = initialiseOwnedClient().finally(() => {
+    _initPromise = null;
+  });
+  return _initPromise;
+}
 
+async function initialiseOwnedClient(): Promise<void> {
+  if (!(await acquireOwnerLock())) return;
+
+  const sessionPath = path.resolve(__dirname, "../..", env.WA_SESSION_PATH);
+  await cleanupStaleBrowserLocks(sessionPath);
+
+  updateStatus("INITIALISING");
   _client = new Client({
     authStrategy: new LocalAuth({
       clientId: env.WA_CLIENT_ID,
@@ -281,6 +459,7 @@ export async function initWhatsappWebjs(): Promise<void> {
     _qrData = qr;
     console.log("\n[WaJS] Scan the QR code below with WhatsApp:\n");
     qrcode.generate(qr, { small: true });
+    persistQr(qr).catch((err) => console.error("[WaJS] Failed to persist QR:", err));
     emitRealtime("wajs:qr", { qr });
     updateStatus("QR_REQUIRED");
   });
@@ -288,6 +467,7 @@ export async function initWhatsappWebjs(): Promise<void> {
   // ── Authenticating ───────────────────────────────────────────────────────
   _client.on("authenticated", () => {
     _qrData = null;
+    persistQr(null).catch(() => undefined);
     console.log("[WaJS] Authenticated — loading session…");
     updateStatus("AUTHENTICATING");
   });
@@ -299,25 +479,11 @@ export async function initWhatsappWebjs(): Promise<void> {
 
     // Phase 1: Hydration / Initial Sync
     try {
-      updateStatus("SYNCING");
-      
-      // Hook into syncAllChats progress if possible, or just wrap it
-      const originalEmit = emitRealtime;
-      // Temporary override to capture progress
-      (global as any).emitRealtime = (event: string, data: any) => {
-        if (event === "sync:progress") {
-          _syncProgress = { total: data.total, done: data.done };
-          console.log(`[WaJS][SYNC] Progress: ${data.done}/${data.total} chats processed`);
-          updateStatus("SYNCING");
-        }
-        originalEmit(event, data);
-      };
-
-      await syncAllChats(_client as any);
-      
-      delete (global as any).emitRealtime;
-      
       updateStatus("CONNECTED");
+      console.log("[WaJS] Client is CONNECTED. Dispatching background sync job...");
+
+      const { syncQueue } = await import("../queues/jobs.js");
+      await syncQueue.add("auto-sync", {}, { delay: 15000 }); // Delay 15s to let WhatsApp Web stabilize
       console.log("[WaJS] Phase 1 chat sync complete. Client CONNECTED ✅");
     } catch (err) {
       console.error("[WaJS] Hydration/Sync failed:", err);
@@ -333,6 +499,7 @@ export async function initWhatsappWebjs(): Promise<void> {
     console.error("[WaJS] Auth failure:", msg);
     audit("system", "whatsapp.auth_failure", "WhatsApp", env.WA_CLIENT_ID, { msg });
     _client = null;
+    releaseOwnerLock().catch(() => undefined);
   });
 
   // ── Disconnected ─────────────────────────────────────────────────────────
@@ -362,6 +529,7 @@ export async function initWhatsappWebjs(): Promise<void> {
       if (_preventReconnect) return;
       try { await _client?.destroy(); } catch { /* best-effort */ }
       _client = null;
+      await releaseOwnerLock().catch(() => undefined);
       await initWhatsappWebjs();
     }, delay);
   });
@@ -381,7 +549,7 @@ export async function initWhatsappWebjs(): Promise<void> {
         if (msg.from === "status@broadcast") return;
       }
 
-      let phone = normalisePhone(msg.from as string);
+      let phone = normalizePhone(msg.from as string);
       const text: string = msg.body ?? "";
       const waMessageId: string = msg.id?._serialized ?? msg.id?.id ?? crypto.randomUUID();
 
@@ -393,9 +561,21 @@ export async function initWhatsappWebjs(): Promise<void> {
         
         // If WhatsApp hid the number behind an @lid, the Contact object might still have the real number!
         if (contact?.number) {
-          phone = `+${contact.number}`;
+          phone = normalizePhone(contact.number);
         }
-      } catch {
+      } catch (err: any) {
+        const errMsg = String(err?.message || err);
+
+        if (
+          errMsg.includes("detached Frame") ||
+          errMsg.includes("Execution context was destroyed")
+        ) {
+          console.warn(
+            `[WaJS] Frame reloaded while fetching contact for message ${waMessageId}`
+          );
+        } else {
+          console.warn(`[WaJS] getContact failed for ${waMessageId}:`, err);
+        }
         // Non-critical — continue without name
       }
 
@@ -409,9 +589,15 @@ export async function initWhatsappWebjs(): Promise<void> {
         name,
         text,
         timestamp: new Date().toISOString()
+      }, {
+        jobId: waMessageId, // Idempotency key: BullMQ drops duplicate jobs with same ID
+        removeOnComplete: true,
+        removeOnFail: false,
+        attempts: 5,
+        backoff: { type: "exponential", delay: 1000 }
       });
 
-      console.log(`[WaJS] ✓ queued inbound job for ${phone}`);
+      console.log(`[WaJS] ✓ queued inbound job for ${phone} (msg: ${waMessageId})`);
     } catch (err) {
       console.error("[WaJS] Failed to process incoming message:", err);
     }
@@ -423,7 +609,12 @@ export async function initWhatsappWebjs(): Promise<void> {
     await _client.initialize();
   } catch (err) {
     console.error("[WaJS] Client.initialize() threw:", err);
+    if (String((err as Error).message ?? err).includes("already running")) {
+      await cleanupStaleBrowserLocks(sessionPath);
+    }
     _status = "DISCONNECTED";
     emitRealtime("wajs:status", { status: _status });
+    await persistStatus();
+    await releaseOwnerLock().catch(() => undefined);
   }
 }

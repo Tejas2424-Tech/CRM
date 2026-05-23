@@ -20,14 +20,8 @@ const io = new Server(server, {
 });
 setRealtime(io);
 
-// ── whatsapp-web.js ───────────────────────────────────────────────────────────
-// Boot the client AFTER Socket.IO is wired up so QR events can be emitted.
-if (env.WA_CLIENT_MODE === "webjs") {
-  const { initWhatsappWebjs } = await import("./services/whatsappWebjs.service.js");
-  await initWhatsappWebjs().catch((err) =>
-    console.error("[WaJS] Failed to initialise:", err)
-  );
-}
+// whatsapp-web.js is owned by the BullMQ worker process. The API process relays
+// worker-published status/QR events to Socket.IO through the Redis realtime bridge.
 
 server.listen(env.API_PORT, () => {
   console.log(`API listening on http://localhost:${env.API_PORT}`);
@@ -36,10 +30,6 @@ server.listen(env.API_PORT, () => {
 // ── Graceful Shutdown ────────────────────────────────────────────────────────
 const shutdown = async () => {
   console.log("\n[API] Shutting down...");
-  if (env.WA_CLIENT_MODE === "webjs") {
-    const { destroyWajsClient } = await import("./services/whatsappWebjs.service.js");
-    await destroyWajsClient();
-  }
   server.close(() => {
     console.log("[API] Server closed");
     process.exit(0);

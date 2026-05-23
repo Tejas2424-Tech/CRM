@@ -34,6 +34,7 @@ const messageSchema = new Schema<MessageDocument>(
 );
 
 messageSchema.index({ leadId: 1, timestamp: -1 });
+messageSchema.index({ chatId: 1, timestamp: -1 });
 messageSchema.index({ content: "text" });
 
 export const Message = model<MessageDocument>("Message", messageSchema);

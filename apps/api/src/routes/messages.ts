@@ -36,10 +36,11 @@ messagesRouter.post("/send", async (req, res) => {
     content: body.text,
     templateId: body.templateId,
     status: "queued",
+    fromMe: true,
     timestamp: new Date()
   });
   console.log(`[Outbound] [Step 3] Adding job to outboundQueue: agent-send for msg ${message._id}`);
-  await outboundQueue.add("agent-send", { messageId: message._id.toString() });
+  await outboundQueue.add("agent-send", { messageId: message._id.toString() }, { jobId: `outbound_${message._id.toString()}` });
   await audit(req.user!.id, "message.send", "Message", message._id.toString(), undefined, serializeMessage(message));
   emitRealtime("message:new", serializeMessage(message));
   res.json({ success: true, message: serializeMessage(message) });

@@ -1,3 +1,4 @@
+import { QRCodeSVG } from "qrcode.react";
 import { SectionTitle } from "../../components";
 
 interface Props {
@@ -42,11 +43,11 @@ export function SettingsPage({ waStatus, waMetadata, waQr, waLogoutLoading, crmR
 
         {isQrPending && waQr && (
           <div style={{ background: "#fff", borderRadius: 8, padding: 16, display: "inline-block", marginBottom: 16 }}>
-            <p style={{ color: "#111", marginBottom: 8, fontWeight: 600, fontSize: 13 }}>Scan with WhatsApp to connect</p>
-            <div style={{ fontFamily: "monospace", fontSize: 11, lineHeight: 1.2, color: "#111", whiteSpace: "pre", background: "#fff", padding: 8 }}>
-              QR ready — check terminal or restart browser to see rendered QR
+            <p style={{ color: "#111", marginBottom: 16, fontWeight: 600, fontSize: 13, textAlign: "center" }}>Scan with WhatsApp to connect</p>
+            <div style={{ background: "#fff", padding: 8, display: "flex", justifyContent: "center" }}>
+              <QRCodeSVG value={waQr} size={200} level="M" includeMargin={false} />
             </div>
-            <p style={{ color: "#555", fontSize: 11, marginTop: 8 }}>Open WhatsApp › Linked Devices › Link a Device</p>
+            <p style={{ color: "#555", fontSize: 11, marginTop: 16, textAlign: "center" }}>Open WhatsApp › Linked Devices › Link a Device</p>
           </div>
         )}
 

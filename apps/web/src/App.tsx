@@ -4,8 +4,8 @@ import {
   LayoutDashboard, ListChecks, MessageSquare, RefreshCw,
   Settings, ShieldCheck, Tags, Users, Wifi
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
-import { api, type Session } from "./api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ApiError, api, type Session } from "./api";
 import { useSocket } from "./hooks/useSocket";
 
 // ── Feature views ─────────────────────────────────────────────────────────────
@@ -19,12 +19,84 @@ import { AnalyticsPage } from "./features/analytics/AnalyticsPage";
 import { TeamPage } from "./features/team/TeamPage";
 import { SettingsPage } from "./features/settings/SettingsPage";
 import { ProfilePage } from "./features/profile/ProfilePage";
+import { mergeUniqueMessages, uniqueById } from "./utils";
 
 // ─────────────────────────────────────────────────────────────────────────────
 
 type SyncState = { status: "idle" | "syncing" | "done"; done: number; total: number };
 type View = "dashboard" | "inbox" | "pipeline" | "leads" | "tasks" | "templates" | "analytics" | "team" | "settings" | "profile";
 type FilterState = { search: string; status: string; tag: string; assignedTo: string; unread: string };
+
+const DEV_USERS_CACHE_KEY = "crm:dev-users";
+const SESSION_CACHE_KEY = "crm:session";
+const AUTH_429_UNTIL_KEY = "crm:auth-429-until";
+
+type AuthCache = {
+  devUsers?: AgentDTO[];
+  devUsersRequest?: Promise<AgentDTO[]>;
+};
+
+function authCache(): AuthCache {
+  const root = globalThis as typeof globalThis & { __crmAuthCache?: AuthCache };
+  root.__crmAuthCache ??= {};
+  return root.__crmAuthCache;
+}
+
+function readJsonCache<T>(key: string): T | null {
+  try {
+    const raw = sessionStorage.getItem(key);
+    return raw ? JSON.parse(raw) as T : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeJsonCache(key: string, value: unknown) {
+  try {
+    sessionStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Storage can be disabled; auth still works through in-memory state.
+  }
+}
+
+function authRetryBlocked() {
+  const retryAt = Number(sessionStorage.getItem(AUTH_429_UNTIL_KEY) ?? 0);
+  return Number.isFinite(retryAt) && retryAt > Date.now();
+}
+
+function rememberAuth429() {
+  sessionStorage.setItem(AUTH_429_UNTIL_KEY, String(Date.now() + 60_000));
+}
+
+function loadDevUsersOnce() {
+  const cache = authCache();
+  if (cache.devUsers) return Promise.resolve(cache.devUsers);
+
+  const stored = readJsonCache<AgentDTO[]>(DEV_USERS_CACHE_KEY);
+  if (stored?.length) {
+    cache.devUsers = stored;
+    return Promise.resolve(stored);
+  }
+
+  if (authRetryBlocked()) {
+    return Promise.reject(new Error("Auth rate limit is cooling down. Please wait a minute, then refresh."));
+  }
+
+  if (!cache.devUsersRequest) {
+    cache.devUsersRequest = api.devUsers().then((users) => {
+      cache.devUsers = users;
+      writeJsonCache(DEV_USERS_CACHE_KEY, users);
+      sessionStorage.removeItem(AUTH_429_UNTIL_KEY);
+      return users;
+    }).catch((err) => {
+      if (err instanceof ApiError && err.status === 429) rememberAuth429();
+      throw err;
+    }).finally(() => {
+      cache.devUsersRequest = undefined;
+    });
+  }
+  return cache.devUsersRequest;
+}
 
 const navItems: Array<{ view: View; label: string; icon: React.ReactNode; manager?: boolean; admin?: boolean }> = [
   { view: "dashboard", label: "Dashboard", icon: <LayoutDashboard size={18} /> },
@@ -68,12 +140,15 @@ export function App() {
   const [leadForm, setLeadForm] = useState({ name: "", phone: "", email: "" });
   const [syncState, setSyncState] = useState<SyncState>({ status: "idle", done: 0, total: 0 });
   const [userForm, setUserForm] = useState({ name: "", email: "", role: "agent" as AgentDTO["role"], capacity: 30 });
-  const [waStatus, setWaStatus] = useState<string>("INITIALISING");
+  const [waStatus, setWaStatus] = useState<string>("UNKNOWN"); // Start UNKNOWN until first status poll
   const [waMetadata, setWaMetadata] = useState<{ connectedAt?: string; lastDisconnectReason?: string; syncProgress?: { total: number; done: number } }>({});
   const [waQr, setWaQr] = useState<string | null>(null);
   const [waLogoutLoading, setWaLogoutLoading] = useState(false);
   const [crmResetState, setCrmResetState] = useState<string>("idle");
   const [error, setError] = useState<string>();
+  const [authLoading, setAuthLoading] = useState(false);
+  const bootstrappedRef = useRef(false);
+  const loginInFlightRef = useRef<string | null>(null);
 
   const selectedLead = leads.find((l) => l.id === selectedLeadId);
   const visibleAgents = useMemo(() => agents.filter((a) => a.role === "agent" && a.active), [agents]);
@@ -81,26 +156,100 @@ export function App() {
   const canManage = session?.user.role === "admin" || session?.user.role === "manager";
   const canAdmin = session?.user.role === "admin";
 
+  /**
+   * UI state mapping layer — frontend MUST NOT use raw backend WajsStatus directly.
+   * Maps system states to 3 semantic levels the UI can safely act on:
+   *   "ready"   → CONNECTED: full send enabled
+   *   "busy"    → transitional states (INITIALISING, AUTHENTICATING, etc.): show banner, allow queueing
+   *   "offline" → DISCONNECTED / FAILED: show error banner, still allow queueing (BullMQ holds it)
+   *   "unknown" → UNKNOWN / BOOTING / missing: show soft banner, allow queueing
+   */
+  const waUiStatus = useMemo((): "ready" | "busy" | "offline" | "unknown" => {
+    switch (waStatus) {
+      case "CONNECTED":                                                                          return "ready";
+      case "INITIALISING": case "AUTHENTICATING": case "HYDRATING": case "SYNCING":             return "busy";
+      case "DISCONNECTED": case "FAILED":                                                        return "offline";
+      default:                                                                                   return "unknown";
+    }
+  }, [waStatus]);
+
+  const refreshWhatsappStatus = useCallback((token: string) => {
+    api.whatsappStatus(token).then((r) => {
+      setWaStatus(r.status);
+      setWaMetadata({
+        connectedAt: r.connectedAt,
+        lastDisconnectReason: r.lastDisconnectReason,
+        syncProgress: r.syncProgress
+      });
+      if (r.syncProgress && r.syncProgress.total > 0) {
+        setSyncState({ status: "syncing", ...r.syncProgress });
+      }
+      if (r.status === "QR_REQUIRED") {
+        api.whatsappQr(token).then((qr) => setWaQr(qr.qr)).catch(() => undefined);
+      }
+    }).catch(() => undefined);
+  }, []);
+
+  const loginAs = useCallback(async (email: string) => {
+    if (authRetryBlocked()) {
+      setError("Auth rate limit is cooling down. Please wait a minute, then try again.");
+      return;
+    }
+    const targetAgent = agents.find((agent) => agent.email === email);
+    if (loginInFlightRef.current === email || targetAgent?.id === session?.user.id) return;
+    loginInFlightRef.current = email;
+    setAuthLoading(true);
+    setError(undefined);
+    try {
+      const nextSession = await api.login(email);
+      setSession(nextSession);
+      writeJsonCache(SESSION_CACHE_KEY, nextSession);
+      sessionStorage.removeItem(AUTH_429_UNTIL_KEY);
+      refreshWhatsappStatus(nextSession.token);
+    } catch (err: unknown) {
+      if (err instanceof ApiError && err.status === 429) rememberAuth429();
+      setError((err as Error).message);
+    } finally {
+      loginInFlightRef.current = null;
+      setAuthLoading(false);
+    }
+  }, [agents, refreshWhatsappStatus, session?.user.id]);
+
   // ── Bootstrap ─────────────────────────────────────────────────────────────
   useEffect(() => {
-    api.devUsers()
-      .then((users) => { setAgents(users); return api.login("admin@local.crm"); })
-      .then((s) => {
-        setSession(s);
-        api.whatsappStatus(s.token).then((r) => {
-          setWaStatus(r.status);
-          setWaMetadata({
-            connectedAt: r.connectedAt,
-            lastDisconnectReason: r.lastDisconnectReason,
-            syncProgress: r.syncProgress
-          });
-          if (r.syncProgress && r.syncProgress.total > 0) {
-            setSyncState({ status: "syncing", ...r.syncProgress });
-          }
-        }).catch(() => undefined);
-        api.whatsappQr(s.token).then((r) => setWaQr(r.qr)).catch(() => undefined);
-      })
-      .catch((err) => setError(err.message));
+    let cancelled = false;
+
+    const bootstrap = async () => {
+      try {
+        setAuthLoading(true);
+        const storedSession = readJsonCache<Session>(SESSION_CACHE_KEY);
+        if (storedSession) {
+          setSession(storedSession);
+          refreshWhatsappStatus(storedSession.token);
+        }
+
+        const timeoutPromise = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("API timeout: Could not load users. Is the backend running?")), 10000)
+        );
+
+        const users = await Promise.race([loadDevUsersOnce(), timeoutPromise]);
+
+        if (!cancelled) setAgents(uniqueById(users));
+      } catch (err: any) {
+        if (!cancelled) {
+          console.error("[Bootstrap] Failed:", err);
+          setError(err.message || "Failed to load dashboard data");
+        }
+      } finally {
+        if (!cancelled) setAuthLoading(false);
+      }
+    };
+
+    bootstrap();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // ── Data loading ──────────────────────────────────────────────────────────
@@ -108,7 +257,7 @@ export function App() {
     if (!session) return;
     api.leads(session.token, filters)
       .then((items) => {
-        setLeads(items);
+        setLeads(uniqueById(items));
         setSelectedLeadId((cur) => cur ?? items[0]?.id);
       })
       .catch((err) => setError(err.message));
@@ -130,10 +279,19 @@ export function App() {
 
   useEffect(() => {
     if (!session || !selectedLeadId) return;
-    api.messages(session.token, selectedLeadId).then(setMessages).catch((err) => setError(err.message));
-    api.notes(session.token, selectedLeadId).then(setNotes).catch(() => setNotes([]));
-    api.leadTasks(session.token, selectedLeadId).then((items) => {
-      setTasks((all) => [...items, ...all.filter((t) => t.leadId !== selectedLeadId)]);
+    const leadId = selectedLeadId;
+    // Always reset messages when switching leads, then populate from API
+    setMessages([]);
+    api.messages(session.token, leadId)
+      .then((fetched) => {
+        setMessages((current) =>
+          mergeUniqueMessages(fetched, current.filter((msg) => msg.leadId === leadId))
+        );
+      })
+      .catch((err) => setError(err.message));
+    api.notes(session.token, leadId).then((items) => setNotes(uniqueById(items))).catch(() => setNotes([]));
+    api.leadTasks(session.token, leadId).then((items) => {
+      setTasks((all) => uniqueById([...items, ...all.filter((t) => t.leadId !== leadId)]));
     }).catch(() => undefined);
   }, [session, selectedLeadId]);
 
@@ -145,12 +303,24 @@ export function App() {
     {
       event: "message:new", handler: (message) => {
         const msg = message as MessageDTO;
-        setSelectedLeadId((cur) => { if (msg.leadId === cur) setMessages((items) => [...items.filter((i) => i.id !== msg.id), msg]); return cur; });
+        // Safely merge the new message into state — deduplicated, sorted
+        setSelectedLeadId((cur) => {
+          if (msg.leadId === cur) {
+            setMessages((items) => mergeUniqueMessages(items, [msg]));
+          }
+          return cur;
+        });
         loadLeads();
       }
     },
-    { event: "message.status_updated", handler: (message) => setMessages((items) => items.map((i) => i.id === (message as MessageDTO).id ? message as MessageDTO : i)) },
-    { event: "task:new", handler: (task) => setTasks((all) => [task as TaskDTO, ...all.filter((i) => i.id !== (task as TaskDTO).id)]) },
+    {
+      event: "message.status_updated", handler: (message) => {
+        const updated = message as MessageDTO;
+        // Merge the updated message — it will replace the existing one by id
+        setMessages((items) => mergeUniqueMessages(items, [updated]));
+      }
+    },
+    { event: "task:new", handler: (task) => setTasks((all) => uniqueById([task as TaskDTO, ...all.filter((i) => i.id !== (task as TaskDTO).id)])) },
     { event: "campaign.updated", handler: () => loadWorkspace() },
     { event: "sync:started", handler: () => setSyncState({ status: "syncing", done: 0, total: 0 }) },
     { event: "sync:progress", handler: (p) => setSyncState({ status: "syncing", ...(p as { total: number; done: number }) }) },
@@ -191,16 +361,24 @@ export function App() {
 
   const sendReply = async () => {
     if (!session || !selectedLead || !reply.trim()) return;
-    const sent = await api.sendMessage(session.token, selectedLead.id, reply.trim());
-    setMessages((items) => [...items, sent.message]);
-    setReply("");
-    updateLead(selectedLead, { unreadCount: 0 });
+    const text = reply.trim();
+    setReply(""); // Clear immediately for snappy UX
+    try {
+      const sent = await api.sendMessage(session.token, selectedLead.id, text);
+      // Merge into state — the server's message wins (has the real ID/waMessageId)
+      // The socket's message:new will also arrive; mergeUniqueMessages handles that gracefully
+      setMessages((items) => mergeUniqueMessages(items, [sent.message]));
+      updateLead(selectedLead, { unreadCount: 0 });
+    } catch (err: any) {
+      setError(err.message ?? "Failed to send message");
+      setReply(text); // Restore reply on failure
+    }
   };
 
   const createNote = async () => {
     if (!session || !selectedLead || !noteBody.trim()) return;
     const note = await api.createNote(session.token, selectedLead.id, noteBody.trim());
-    setNotes((items) => [note, ...items]);
+    setNotes((items) => uniqueById([note, ...items]));
     setNoteBody("");
   };
 
@@ -211,14 +389,14 @@ export function App() {
       dueAt: new Date(taskForm.dueAt).toISOString(),
       assignedTo: taskForm.assignedTo || selectedLead.assignedTo
     });
-    setTasks((items) => [task, ...items]);
+    setTasks((items) => uniqueById([task, ...items]));
     setTaskForm({ title: "", dueAt: "", assignedTo: "" });
   };
 
   const createLead = async () => {
     if (!session || !leadForm.phone) return;
     const lead = await api.createLead(session.token, { ...leadForm, status: "new", tags: [], source: "manual" });
-    setLeads((items) => [lead, ...items]);
+    setLeads((items) => uniqueById([lead, ...items]));
     setSelectedLeadId(lead.id);
     setLeadForm({ name: "", phone: "", email: "" });
     setView("inbox");
@@ -227,7 +405,7 @@ export function App() {
   const createUser = async () => {
     if (!session || !canAdmin || !userForm.name || !userForm.email) return;
     const user = await api.createUser(session.token, userForm);
-    setAgents((items) => [...items, user]);
+    setAgents((items) => uniqueById([...items, user]));
     setUserForm({ name: "", email: "", role: "agent", capacity: 30 });
   };
 
@@ -258,7 +436,23 @@ export function App() {
   if (!session) {
     return (
       <main className="login-screen">
-        <div className="login-card"><MessageSquare /><strong>WhatsApp CRM</strong><span>Connecting workspace…</span></div>
+        <div className="login-card">
+          <MessageSquare />
+          <strong>WhatsApp CRM</strong>
+          <span>{authLoading ? "Loading users..." : "Choose a dev user to continue"}</span>
+          <div style={{ display: "grid", gap: 8, width: "100%", marginTop: 14 }}>
+            {agents.map((agent) => (
+              <button
+                key={agent.id}
+                className="primary-button"
+                disabled={authLoading}
+                onClick={() => loginAs(agent.email ?? "admin@local.crm")}
+              >
+                {agent.name} - {agent.role}
+              </button>
+            ))}
+          </div>
+        </div>
       </main>
     );
   }
@@ -296,7 +490,7 @@ export function App() {
             </button>
             <select className="input h-10" value={session.user.id} onChange={(e) => {
               const agent = agents.find((a) => a.id === e.target.value);
-              if (agent) api.login(agent.email ?? "admin@local.crm").then(setSession);
+              if (agent) loginAs(agent.email ?? "admin@local.crm");
             }}>
               {agents.map((a) => <option key={a.id} value={a.id}>{a.name} - {a.role}</option>)}
             </select>
@@ -306,7 +500,7 @@ export function App() {
         {view === "dashboard" && <Dashboard leads={leads} tasks={tasks} agents={agents} analytics={analytics} setView={(v) => setView(v as View)} />}
         {view === "inbox" && (
           <Inbox
-            waStatus={waStatus} leads={leads} selectedLead={selectedLead} selectedLeadId={selectedLeadId}
+            waStatus={waUiStatus} leads={leads} selectedLead={selectedLead} selectedLeadId={selectedLeadId}
             messages={messages} notes={notes} tasks={tasks.filter((t) => t.leadId === selectedLeadId)}
             agents={visibleAgents} filters={filters} reply={reply} noteBody={noteBody} taskForm={taskForm}
             setFilters={setFilters} setSelectedLeadId={setSelectedLeadId} setReply={setReply}

@@ -1,5 +1,5 @@
 import { Queue } from "bullmq";
-import { redisConnection } from "./connection.js";
+import { createRedisConnection } from "./connection.js";
 
 export type InboundJob = {
   waMessageId: string;
@@ -25,14 +25,21 @@ export type StatusJob = {
   status: "sent" | "delivered" | "read";
 };
 
-export const inboundQueue = new Queue<InboundJob>("process-inbound-message", { connection: redisConnection });
+export type SyncJob = {
+  // Empty payload for now, triggers full sync
+};
+
+const defaultOpts = { attempts: 5, backoff: { type: "exponential", delay: 2000 }, removeOnComplete: true, removeOnFail: false };
+
+export const inboundQueue = new Queue<InboundJob>("process-inbound-message", { connection: createRedisConnection(), defaultJobOptions: defaultOpts });
 export const outboundQueue = new Queue<OutboundJob>("send-outbound-message", { 
-  connection: redisConnection,
-  defaultJobOptions: { attempts: 10, backoff: { type: "exponential", delay: 5000 } }
+  connection: createRedisConnection(),
+  defaultJobOptions: defaultOpts
 });
 export const campaignQueue = new Queue<CampaignRecipientJob>("send-campaign-recipient", { 
-  connection: redisConnection,
-  defaultJobOptions: { attempts: 10, backoff: { type: "exponential", delay: 5000 } }
+  connection: createRedisConnection(),
+  defaultJobOptions: defaultOpts
 });
-export const statusQueue = new Queue<StatusJob>("simulate-message-status", { connection: redisConnection });
-export const automationQueue = new Queue<InboundJob>("run-automation", { connection: redisConnection });
+export const statusQueue = new Queue<StatusJob>("simulate-message-status", { connection: createRedisConnection(), defaultJobOptions: defaultOpts });
+export const automationQueue = new Queue<InboundJob>("run-automation", { connection: createRedisConnection(), defaultJobOptions: defaultOpts });
+export const syncQueue = new Queue<SyncJob>("whatsapp-sync", { connection: createRedisConnection(), defaultJobOptions: { ...defaultOpts, attempts: 1 } });

@@ -8,16 +8,27 @@ export interface Session {
   user: AuthUser;
 }
 
+export class ApiError extends Error {
+  constructor(message: string, public status: number) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 async function requestJson<T>(path: string, token?: string, init?: RequestInit): Promise<T> {
+  const headers: Record<string, string> = {
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(init?.body ? { "Content-Type": "application/json" } : {}),
+    ...(init?.headers as Record<string, string> | undefined)
+  };
+
   const res = await fetch(`${API_URL}${path}`, {
     ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...init?.headers
-    }
+    headers
   });
-  if (!res.ok) throw new Error((await res.json().catch(() => undefined))?.error ?? res.statusText);
+  if (!res.ok) {
+    throw new ApiError((await res.json().catch(() => undefined))?.error ?? res.statusText, res.status);
+  }
   return res.json() as Promise<T>;
 }
 
