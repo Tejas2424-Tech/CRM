@@ -1,12 +1,10 @@
 import type { CampaignDTO, TemplateDTO } from "@crm/shared";
 import { SectionTitle } from "../../components";
 
-interface Props {
-  templates: TemplateDTO[];
-  campaigns: CampaignDTO[];
-}
+import { useCrm } from "../../context/CrmContext";
 
-export function TemplatesPage({ templates, campaigns }: Props) {
+export function TemplatesPage() {
+  const { analytics: { templates, campaigns } } = useCrm();
   return (
     <div className="page-grid">
       <section className="panel span-2">

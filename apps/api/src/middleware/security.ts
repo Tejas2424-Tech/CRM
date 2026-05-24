@@ -31,7 +31,18 @@ export const authRateLimit = rateLimit({
   max: 20,
   standardHeaders: "draft-7",
   legacyHeaders: false,
-  message: { error: "Too many login attempts — try again later" }
+  message: { error: "Too many login attempts — try again later" },
+  handler: (req, res, _next, options) => {
+    console.warn(JSON.stringify({
+      t: new Date().toISOString(),
+      level: "warn",
+      msg: "Auth rate limit hit",
+      ip: req.ip,
+      url: req.url,
+      reqId: req.requestId,
+    }));
+    res.status(options.statusCode).json(options.message);
+  },
 });
 
 // ─── Request ID ───────────────────────────────────────────────────────────────

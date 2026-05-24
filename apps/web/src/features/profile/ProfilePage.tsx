@@ -3,13 +3,11 @@ import type { Session } from "../../api";
 import { Metric, SectionTitle } from "../../components";
 import { initials } from "../../utils";
 
-interface Props {
-  user?: AgentDTO;
-  session: Session;
-  tasks: TaskDTO[];
-}
+import { useCrm } from "../../context/CrmContext";
 
-export function ProfilePage({ user, session, tasks }: Props) {
+export function ProfilePage() {
+  const { auth: { currentAgent: user, session }, tasks: { tasks } } = useCrm();
+  if (!session) return null;
   return (
     <div className="page-grid">
       <section className="panel">

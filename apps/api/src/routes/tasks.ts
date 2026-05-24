@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { requireAuth } from "../auth/auth.js";
 import { Task } from "../models/Task.js";
+import { classifyLead } from "../services/leadClassifier.service.js";
 import { serializeTask } from "../services/serializers.js";
 
 export const tasksRouter = Router();
@@ -38,5 +39,8 @@ tasksRouter.patch("/:id", async (req, res) => {
   };
   const task = await Task.findByIdAndUpdate(req.params.id, update, { new: true });
   if (!task) return res.status(404).json({ error: "Task not found" });
+  if (body.status === "done" && task.leadId) {
+    classifyLead(task.leadId.toString(), { type: "task_completed" }).catch(console.warn);
+  }
   res.json(serializeTask(task));
 });

@@ -2,14 +2,14 @@ import type { AgentDTO, LeadDTO, LeadStatus } from "@crm/shared";
 import { LeadAvatar, agentName, formatPhone, stageLabels } from "../../components";
 import { stages } from "../../utils";
 
+import { useCrm } from "../../context/CrmContext";
+
 interface Props {
-  leads: LeadDTO[];
-  agents: AgentDTO[];
-  updateLead: (lead: LeadDTO, patch: Partial<LeadDTO>) => void;
   openLead: (id: string) => void;
 }
 
-export function Pipeline({ leads, agents, updateLead, openLead }: Props) {
+export function Pipeline({ openLead }: Props) {
+  const { leads: { leads, updateLead }, auth: { agents } } = useCrm();
   return (
     <div className="pipeline">
       {stages.map((stage) => (

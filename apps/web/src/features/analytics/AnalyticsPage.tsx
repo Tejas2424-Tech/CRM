@@ -3,13 +3,10 @@ import { api } from "../../api";
 import { Metric, SectionTitle, StageMeter } from "../../components";
 import { stageLabels, stages } from "../../utils";
 
-interface Props {
-  leads: LeadDTO[];
-  analytics?: Awaited<ReturnType<typeof api.analytics>>;
-  agents: AgentDTO[];
-}
+import { useCrm } from "../../context/CrmContext";
 
-export function AnalyticsPage({ leads, analytics, agents }: Props) {
+export function AnalyticsPage() {
+  const { leads: { leads }, analytics: { analytics }, auth: { agents } } = useCrm();
   return (
     <div className="page-grid">
       <div className="metrics span-3">

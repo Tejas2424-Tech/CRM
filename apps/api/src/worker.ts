@@ -1,11 +1,12 @@
 import { Worker } from "bullmq";
 import { connectDatabase } from "./config/db.js";
 import { env } from "./config/env.js";
-import { redisConnection, createRedisConnection } from "./queues/connection.js";
-import type { CampaignRecipientJob, InboundJob, OutboundJob, StatusJob, SyncJob } from "./queues/jobs.js";
-import { syncQueue } from "./queues/jobs.js";
+import { redisConnection, publisher, createRedisConnection } from "./queues/connection.js";
+import type { CampaignRecipientJob, InboundJob, LostLeadsJob, OutboundJob, StatusJob, SyncJob } from "./queues/jobs.js";
+import { lostLeadsQueue, syncQueue } from "./queues/jobs.js";
 import { runAutomation } from "./services/automation.js";
 import { processInboundMessage } from "./services/inbound.js";
+import { recomputeLostLeads } from "./services/leadClassifier.service.js";
 import { sendCampaignRecipient, sendOutboundMessage, updateMessageStatus } from "./services/outbound.js";
 import {
   destroyWajsClient,
@@ -17,7 +18,11 @@ import { syncAllChats } from "./services/chatSync.service.js";
 
 await connectDatabase();
 
-const commandSubscriber = redisConnection.duplicate();
+// Fresh dedicated connection for WhatsApp command subscription.
+// Must never execute regular Redis commands after .subscribe() is called —
+// Redis enforces subscribe-mode exclusivity and will throw on any other command.
+// createRedisConnection() gives it its own socket + built-in error handler.
+const commandSubscriber = createRedisConnection();
 
 if (env.WA_CLIENT_MODE === "webjs") {
   await initWhatsappWebjs().catch((err) => {
@@ -52,8 +57,16 @@ const workers = [
   new Worker<SyncJob>("whatsapp-sync", async () => {
     const client = getWajsClient();
     await syncAllChats(client as any);
-  }, { connection: createRedisConnection(), concurrency: 1 })
+  }, { connection: createRedisConnection(), concurrency: 1 }),
+  new Worker<LostLeadsJob>("recompute-lost-leads", async () => {
+    await recomputeLostLeads();
+  }, { connection: createRedisConnection() })
 ];
+
+// Schedule the daily lost-leads scan (idempotent — BullMQ deduplicates by repeat key)
+lostLeadsQueue.add("daily-lost-check", {}, {
+  repeat: { pattern: "0 2 * * *" } // 2 AM daily
+}).catch((err) => console.error("[Worker][LostLeads] Failed to schedule repeatable job:", err));
 
 for (const worker of workers) {
   worker.on("active", (job) => {
@@ -82,10 +95,12 @@ async function shutdown(signal: string) {
   shuttingDown = true;
   console.log(`[Worker] ${signal} received. Closing workers and WhatsApp client...`);
   await Promise.allSettled(workers.map((worker) => worker.close()));
+  await lostLeadsQueue.close().catch(() => undefined);
   await commandSubscriber.quit().catch(() => undefined);
   if (env.WA_CLIENT_MODE === "webjs") {
     await destroyWajsClient();
   }
+  await publisher.quit().catch(() => undefined);
   await redisConnection.quit().catch(() => undefined);
   process.exit(0);
 }

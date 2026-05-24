@@ -6,6 +6,7 @@ import { Message } from "../models/Message.js";
 import { Template } from "../models/Template.js";
 import { statusQueue } from "../queues/jobs.js";
 import { whatsAppAdapter } from "../adapters/whatsapp.js";
+import { classifyLead } from "./leadClassifier.service.js";
 import { serializeMessage } from "./serializers.js";
 import { waitForWhatsAppReady, getWajsStatus } from "./whatsappWebjs.service.js";
 
@@ -89,6 +90,7 @@ export async function sendOutboundMessage(messageId: string, attemptsMade: numbe
     lead.lastActivity = new Date();
     lead.unreadCount = 0;
     await lead.save();
+    classifyLead(lead._id.toString(), { type: "outbound_message", text: message.content ?? undefined }).catch(console.warn);
     emitRealtime("message.status_updated", serializeMessage(message));
 
     await statusQueue.add("delivered", { messageId, waMessageId: message.waMessageId, status: "delivered" }, { delay: 800 });

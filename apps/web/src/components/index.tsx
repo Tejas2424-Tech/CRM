@@ -20,6 +20,26 @@ export function Empty({ text }: { text: string }) {
   return <div className="empty">{text}</div>;
 }
 
+/** Animated placeholder matching a <Metric /> card */
+export function SkeletonMetric() {
+  return (
+    <div className="metric">
+      <span className="skeleton" style={{ width: "60%", height: 12, display: "block", borderRadius: 4 }} />
+      <strong className="skeleton" style={{ width: "40%", height: 28, display: "block", marginTop: 8, borderRadius: 4 }} />
+    </div>
+  );
+}
+
+/** Animated placeholder matching a <LeadLine /> or <TaskLine /> row */
+export function SkeletonLine() {
+  return (
+    <p className="timeline-item" style={{ display: "grid", gap: 6 }}>
+      <span className="skeleton" style={{ width: "55%", height: 13, display: "block", borderRadius: 4 }} />
+      <span className="skeleton" style={{ width: "75%", height: 11, display: "block", borderRadius: 4 }} />
+    </p>
+  );
+}
+
 export function StageMeter({ label, count, total }: { label: string; count: number; total: number }) {
   return (
     <div className="stage-meter">

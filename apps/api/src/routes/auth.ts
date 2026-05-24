@@ -4,20 +4,34 @@ import { User } from "../models/User.js";
 import { serializeUser } from "../services/serializers.js";
 import { signUser, requireAuth } from "../auth/auth.js";
 import { audit } from "../services/audit.js";
+import { env } from "../config/env.js";
 
 export const authRouter = Router();
 
 authRouter.get("/dev-users", async (_req, res, next) => {
+  const startedAt = Date.now();
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
   try {
     const timeout = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error("Database timeout")), 5000)
+      timeoutId = setTimeout(() => reject(new Error("Database timeout")), 5000)
     );
+    if (env.NODE_ENV !== "test") {
+      console.log("[Auth] GET /auth/dev-users start");
+    }
     const users = await Promise.race([
       User.find({ active: true }).sort({ role: 1 }),
       timeout
     ]);
+    clearTimeout(timeoutId);
+    if (env.NODE_ENV !== "test") {
+      console.log(`[Auth] GET /auth/dev-users success: ${users.length} users in ${Date.now() - startedAt}ms`);
+    }
     res.json(users.map(serializeUser));
   } catch (err: any) {
+    clearTimeout(timeoutId);
+    if (env.NODE_ENV !== "test") {
+      console.error(`[Auth] GET /auth/dev-users failed after ${Date.now() - startedAt}ms: ${err.message}`);
+    }
     if (err.message === "Database timeout") {
       return res.status(503).json({ error: "Service unavailable (Database timeout)" });
     }

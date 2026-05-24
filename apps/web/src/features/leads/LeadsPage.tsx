@@ -2,17 +2,14 @@ import type { AgentDTO, LeadDTO } from "@crm/shared";
 import { Plus } from "lucide-react";
 import { LeadAvatar, SectionTitle, agentName, formatPhone, stageLabels } from "../../components";
 
+import { useCrm } from "../../context/CrmContext";
+
 interface Props {
-  leads: LeadDTO[];
-  agents: AgentDTO[];
-  form: { name: string; phone: string; email: string };
-  setForm: (f: { name: string; phone: string; email: string }) => void;
-  createLead: () => void;
   openLead: (id: string) => void;
-  canManage: boolean;
 }
 
-export function LeadsPage({ leads, agents, form, setForm, createLead, openLead, canManage }: Props) {
+export function LeadsPage({ openLead }: Props) {
+  const { leads: { leads, leadForm: form, setLeadForm: setForm, createLead }, auth: { agents, canManage } } = useCrm();
   return (
     <div className="page-grid">
       <section className="panel span-3">

@@ -149,6 +149,18 @@ describe("Messaging CRM API", () => {
     expect(await User.countDocuments()).toBe(3);
   });
 
+  it("returns 400 validation errors for invalid lead email updates", async () => {
+    const lead = await Lead.create({ phone: "15551234567", consent: { optedIn: true }, lastActivity: new Date() });
+    const res = await request(app)
+      .patch(`/api/leads/${lead._id}`)
+      .set("Authorization", `Bearer ${token("agent")}`)
+      .send({ email: "not-an-email" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("Validation failed");
+    expect(res.body.details[0].message).toBe("Invalid email address");
+  });
+
   // ── Bug fix: Task dueDate → dueAt ──────────────────────────────────────────
 
   it("creates a task using dueAt (canonical field)", async () => {

@@ -1,5 +1,6 @@
 import cors from "cors";
 import express from "express";
+import { ZodError } from "zod";
 import { env } from "./config/env.js";
 import { apiRateLimit, authRateLimit, requestId, securityHeaders } from "./middleware/security.js";
 import { routes } from "./routes/index.js";
@@ -37,7 +38,10 @@ export function createApp() {
   app.use(express.json({ limit: "2mb" }));
 
   // ── Rate limiting ────────────────────────────────────────────────────────────
-  // Tighter limit on auth routes; standard limit on everything else.
+  // Tighter limit on credential-bearing auth routes; standard limit elsewhere.
+  // /auth/dev-users is a public list endpoint (no credentials) so it uses the
+  // standard limiter — applying the tight auth limit causes 429s during dev HMR.
+  app.use("/auth/dev-users", apiRateLimit);
   app.use("/auth", authRateLimit);
   app.use("/api", apiRateLimit);
 
@@ -49,8 +53,9 @@ export function createApp() {
   // error handler). Zod validation errors (status 400) are surfaced cleanly;
   // unexpected 500s are logged and their stacks hidden in production.
   app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
-    const status: number = err.status ?? err.statusCode ?? 500;
-    const message: string = err.message ?? "Internal Server Error";
+    const isValidationError = err instanceof ZodError;
+    const status: number = isValidationError ? 400 : err.status ?? err.statusCode ?? 500;
+    const message: string = isValidationError ? "Validation failed" : err.message ?? "Internal Server Error";
 
     if (status >= 500 && env.NODE_ENV !== "test") {
       console.error(JSON.stringify({
@@ -64,7 +69,7 @@ export function createApp() {
 
     res.status(status).json({
       error: message,
-      ...(err.issues && { details: err.issues }),
+      ...(isValidationError && { details: err.issues }),
       ...(env.NODE_ENV === "development" && { stack: err.stack })
     });
   });

@@ -2,6 +2,8 @@
 import type { AgentDTO, AuthUser, CampaignDTO, LeadDTO, MessageDTO, NoteDTO, TaskDTO, TemplateDTO } from "@crm/shared";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:4000";
+const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
+const AUTH_REQUEST_TIMEOUT_MS = 10_000;
 
 export interface Session {
   token: string;
@@ -9,33 +11,84 @@ export interface Session {
 }
 
 export class ApiError extends Error {
-  constructor(message: string, public status: number) {
+  constructor(message: string, public status: number, public details?: unknown) {
     super(message);
     this.name = "ApiError";
   }
 }
 
-async function requestJson<T>(path: string, token?: string, init?: RequestInit): Promise<T> {
+type RequestOptions = {
+  timeoutMs?: number;
+};
+
+async function requestJson<T>(path: string, token?: string, init?: RequestInit, options: RequestOptions = {}): Promise<T> {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const url = `${API_URL}${path}`;
+  const startedAt = Date.now();
+  const controller = new AbortController();
+  let timedOut = false;
+  const callerSignal = init?.signal;
+  const abortFromCaller = () => controller.abort();
+  const timeoutId = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+
+  if (callerSignal) {
+    if (callerSignal.aborted) {
+      controller.abort();
+    } else {
+      callerSignal.addEventListener("abort", abortFromCaller, { once: true });
+    }
+  }
+
   const headers: Record<string, string> = {
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
     ...(init?.body ? { "Content-Type": "application/json" } : {}),
     ...(init?.headers as Record<string, string> | undefined)
   };
 
-  const res = await fetch(`${API_URL}${path}`, {
-    ...init,
-    headers
-  });
-  if (!res.ok) {
-    throw new ApiError((await res.json().catch(() => undefined))?.error ?? res.statusText, res.status);
+  try {
+    const res = await fetch(url, {
+      ...init,
+      headers,
+      signal: controller.signal
+    });
+    const elapsedMs = Date.now() - startedAt;
+    if (import.meta.env.DEV) {
+      console.debug(`[API] ${init?.method ?? "GET"} ${path} -> ${res.status} in ${elapsedMs}ms`);
+    }
+    if (!res.ok) {
+      const body = await res.json().catch(() => undefined) as { error?: string; details?: Array<{ message?: string; path?: Array<string | number> }> } | undefined;
+      const firstDetail = Array.isArray(body?.details) ? body.details[0] : undefined;
+      const detailMessage = firstDetail?.message;
+      const message = body?.error
+        ? detailMessage
+          ? `${body.error}: ${detailMessage}`
+          : body.error
+        : res.statusText;
+      throw new ApiError(message, res.status, body?.details);
+    }
+    return res.json() as Promise<T>;
+  } catch (err) {
+    const elapsedMs = Date.now() - startedAt;
+    if (timedOut || (err instanceof DOMException && err.name === "AbortError")) {
+      console.warn(`[API] ${init?.method ?? "GET"} ${path} timed out after ${elapsedMs}ms`);
+      throw new ApiError(`Request timed out after ${Math.round(timeoutMs / 1000)}s`, 408);
+    }
+    console.warn(`[API] ${init?.method ?? "GET"} ${path} failed after ${elapsedMs}ms`, err);
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+    callerSignal?.removeEventListener("abort", abortFromCaller);
   }
-  return res.json() as Promise<T>;
 }
 
 export const api = {
   apiUrl: API_URL,
-  devUsers: () => requestJson<AgentDTO[]>("/auth/dev-users"),
-  login: (email: string) => requestJson<Session>("/auth/dev-login", undefined, { method: "POST", body: JSON.stringify({ email }) }),
+  devUsers: () => requestJson<AgentDTO[]>("/auth/dev-users", undefined, undefined, { timeoutMs: AUTH_REQUEST_TIMEOUT_MS }),
+  login: (email: string) =>
+    requestJson<Session>("/auth/dev-login", undefined, { method: "POST", body: JSON.stringify({ email }) }, { timeoutMs: AUTH_REQUEST_TIMEOUT_MS }),
   leads: (token: string, filters: Record<string, string>) => {
     const params = new URLSearchParams(Object.entries(filters).filter(([, value]) => value));
     return requestJson<LeadDTO[]>(`/api/leads?${params}`, token);
@@ -60,6 +113,8 @@ export const api = {
   users: (token: string) => requestJson<AgentDTO[]>("/api/users", token),
   createUser: (token: string, body: { name: string; email: string; role: AgentDTO["role"]; capacity: number }) =>
     requestJson<AgentDTO>("/api/users", token, { method: "POST", body: JSON.stringify(body) }),
+  updateUser: (token: string, id: string, body: { name?: string; role?: AgentDTO["role"]; active?: boolean; capacity?: number }) =>
+    requestJson<AgentDTO>(`/api/users/${id}`, token, { method: "PATCH", body: JSON.stringify(body) }),
   campaigns: (token: string) => requestJson<CampaignDTO[]>("/api/campaigns", token),
   createCampaign: (token: string, body: { name: string; templateId: string; audienceQuery: Record<string, string>; scheduledAt?: string }) =>
     requestJson<CampaignDTO>("/api/campaigns", token, { method: "POST", body: JSON.stringify(body) }),

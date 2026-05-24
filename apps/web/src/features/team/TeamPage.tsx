@@ -1,23 +1,45 @@
-import type { AgentDTO, LeadDTO } from "@crm/shared";
+import type { AgentDTO } from "@crm/shared";
 import { Plus } from "lucide-react";
+import { useState } from "react";
 import { SectionTitle } from "../../components";
 import { initials } from "../../utils";
+import { useCrm } from "../../context/CrmContext";
+import { api } from "../../api";
 
-interface Props {
-  agents: AgentDTO[];
-  leads: LeadDTO[];
-  form: { name: string; email: string; role: AgentDTO["role"]; capacity: number };
-  setForm: (f: { name: string; email: string; role: AgentDTO["role"]; capacity: number }) => void;
-  createUser: () => void;
-  canAdmin: boolean;
-}
+export function TeamPage() {
+  const { auth, leads, setGlobalError } = useCrm();
+  const [form, setForm] = useState({ name: "", email: "", role: "agent" as AgentDTO["role"], capacity: 30 });
 
-export function TeamPage({ agents, leads, form, setForm, createUser, canAdmin }: Props) {
+  const createUser = async () => {
+    if (!auth.session || !auth.canAdmin || !form.name || !form.email) return;
+    try {
+      const user = await api.createUser(auth.session.token, form);
+      auth.setAgents((items) => {
+        const map = new Map();
+        [...items, user].forEach(i => map.set(i.id, i));
+        return Array.from(map.values());
+      });
+      setForm({ name: "", email: "", role: "agent", capacity: 30 });
+    } catch (err: any) {
+      setGlobalError(err.message);
+    }
+  };
+
+  const changeRole = async (agent: AgentDTO, role: AgentDTO["role"]) => {
+    if (!auth.session || !auth.canAdmin || role === agent.role) return;
+    try {
+      const updated = await api.updateUser(auth.session.token, agent.id, { role });
+      auth.setAgents((items) => items.map((i) => (i.id === updated.id ? updated : i)));
+    } catch (err: any) {
+      setGlobalError(err.message);
+    }
+  };
+
   return (
     <div className="page-grid">
       <section className="panel span-3">
         <SectionTitle title="Team Management" />
-        {canAdmin && (
+        {auth.canAdmin && (
           <div className="form-row">
             <input className="input" placeholder="Name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
             <input className="input" placeholder="Email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
@@ -30,13 +52,25 @@ export function TeamPage({ agents, leads, form, setForm, createUser, canAdmin }:
           </div>
         )}
         <div className="team-grid">
-          {agents.map((agent) => (
+          {auth.agents.map((agent) => (
             <article className="team-card" key={agent.id}>
               <span className="avatar">{initials(agent.name)}</span>
               <strong>{agent.name}</strong>
               <small>{agent.email}</small>
-              <span className="chip">{agent.role}</span>
-              <p>{leads.filter((l) => l.assignedTo === agent.id).length} assigned leads</p>
+              {auth.canAdmin ? (
+                <select
+                  className="input"
+                  value={agent.role}
+                  onChange={(e) => changeRole(agent, e.target.value as AgentDTO["role"])}
+                >
+                  <option value="agent">Agent</option>
+                  <option value="manager">Manager</option>
+                  <option value="admin">Admin</option>
+                </select>
+              ) : (
+                <span className="chip">{agent.role}</span>
+              )}
+              <p>{leads.leads.filter((l) => l.assignedTo === agent.id).length} assigned leads</p>
             </article>
           ))}
         </div>

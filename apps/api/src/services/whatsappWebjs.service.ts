@@ -56,6 +56,9 @@ export type WajsStatus =
 
 /** Staleness threshold: if Redis state is older than this, treat as UNKNOWN */
 const STATUS_STALE_MS = 3 * 60_000; // 3 minutes
+const STATUS_TTL_SECONDS = Math.ceil(STATUS_STALE_MS / 1000) + 60;
+const OWNER_LOCK_RETRY_MS = OWNER_LOCK_TTL_SECONDS * 1000 + 5000;
+const INIT_WATCHDOG_MS = 2 * 60_000;
 
 let _status: WajsStatus = "BOOTING"; // Process just started — not INITIALISING yet
 let _connectedAt: Date | null = null;
@@ -73,6 +76,8 @@ let _ownsClient = false;
 let _initPromise: Promise<void> | null = null;
 let _ownerLockRefresh: NodeJS.Timeout | null = null;
 let _heartbeatInterval: NodeJS.Timeout | null = null;
+let _initRetryTimer: NodeJS.Timeout | null = null;
+let _initWatchdog: NodeJS.Timeout | null = null;
 
 import { normalizePhone } from "../utils/phone.js";
 
@@ -163,11 +168,12 @@ function updateStatus(newStatus: WajsStatus, metadata: any = {}) {
   if (newStatus === "CONNECTED") {
     _connectedAt = new Date();
     _reconnectAttempts = 0;
-    startHeartbeat(); // Keep Redis fresh while connected
   }
 
   if (newStatus === "DISCONNECTED" || newStatus === "FAILED") {
     stopHeartbeat();
+  } else if (newStatus !== "BOOTING" && newStatus !== "UNKNOWN") {
+    startHeartbeat(); // Keep Redis fresh during QR/auth/ready transitions too
   }
 
   emitRealtime("wajs:status", { 
@@ -197,8 +203,9 @@ async function persistStatus(metadata: Record<string, unknown> = {}) {
       owner: _ownsClient ? WA_OWNER_ID : undefined,
       heartbeatAt: Date.now(), // Staleness detection field
       updatedAt: new Date().toISOString()
-    })
-    // NO TTL — state is permanent until explicitly overwritten by a real transition
+    }),
+    "EX",
+    STATUS_TTL_SECONDS
   );
 }
 
@@ -233,7 +240,8 @@ async function acquireOwnerLock(): Promise<boolean> {
   const acquired = await redisConnection.set(WA_OWNER_LOCK_KEY, WA_OWNER_ID, "EX", OWNER_LOCK_TTL_SECONDS, "NX");
   if (!acquired) {
     const owner = await redisConnection.get(WA_OWNER_LOCK_KEY);
-    console.warn(`[WaJS] Another process owns WhatsApp (${owner ?? "unknown"}); skipping local init.`);
+    console.warn(`[WaJS] Another process owns WhatsApp (${owner ?? "unknown"}); retrying after owner lock TTL.`);
+    scheduleInitRetry(OWNER_LOCK_RETRY_MS);
     return false;
   }
 
@@ -245,6 +253,43 @@ async function acquireOwnerLock(): Promise<boolean> {
   }, 15_000);
   console.log(`[WaJS] Acquired WhatsApp owner lock as ${WA_OWNER_ID}`);
   return true;
+}
+
+function scheduleInitRetry(delayMs: number) {
+  if (_initRetryTimer || _preventReconnect) return;
+  _initRetryTimer = setTimeout(() => {
+    _initRetryTimer = null;
+    if (_preventReconnect || _client) return;
+    initWhatsappWebjs().catch((err) =>
+      console.error("[WaJS] Scheduled init retry failed:", err)
+    );
+  }, delayMs);
+}
+
+function startInitWatchdog() {
+  stopInitWatchdog();
+  _initWatchdog = setTimeout(async () => {
+    if (!_client) return;
+    if (!["INITIALISING", "AUTHENTICATING", "HYDRATING"].includes(_status)) return;
+
+    console.warn(`[WaJS] Client stuck in ${_status}; destroying and reinitialising.`);
+    try {
+      await _client.destroy();
+    } catch (err) {
+      console.warn("[WaJS] destroy() during watchdog recovery failed:", err);
+    }
+    _client = null;
+    updateStatus("DISCONNECTED", { reason: `stuck_${_status.toLowerCase()}` });
+    await releaseOwnerLock().catch(() => undefined);
+    scheduleInitRetry(INITIAL_RECONNECT_DELAY_MS);
+  }, INIT_WATCHDOG_MS);
+}
+
+function stopInitWatchdog() {
+  if (_initWatchdog) {
+    clearTimeout(_initWatchdog);
+    _initWatchdog = null;
+  }
 }
 
 async function releaseOwnerLock() {
@@ -313,6 +358,11 @@ export async function waitForWhatsAppReady(timeoutMs = 60000): Promise<void> {
 export async function destroyWajsClient(): Promise<void> {
   _preventReconnect = true;
   stopHeartbeat();
+  stopInitWatchdog();
+  if (_initRetryTimer) {
+    clearTimeout(_initRetryTimer);
+    _initRetryTimer = null;
+  }
   if (_client) {
     try {
       console.log("[WaJS] Destroying client for shutdown...");
@@ -433,6 +483,7 @@ async function initialiseOwnedClient(): Promise<void> {
   await cleanupStaleBrowserLocks(sessionPath);
 
   updateStatus("INITIALISING");
+  startInitWatchdog();
   _client = new Client({
     authStrategy: new LocalAuth({
       clientId: env.WA_CLIENT_ID,
@@ -474,6 +525,7 @@ async function initialiseOwnedClient(): Promise<void> {
 
   // ── Ready ────────────────────────────────────────────────────────────────
   _client.on("ready", async () => {
+    stopInitWatchdog();
     updateStatus("HYDRATING");
     console.log("[WaJS] Client is ready. Waiting for hydration…");
 
@@ -494,6 +546,7 @@ async function initialiseOwnedClient(): Promise<void> {
 
   // ── Auth failure ─────────────────────────────────────────────────────────
   _client.on("auth_failure", (msg: string) => {
+    stopInitWatchdog();
     _lastDisconnectReason = msg;
     updateStatus("FAILED", { error: msg });
     console.error("[WaJS] Auth failure:", msg);
@@ -504,6 +557,7 @@ async function initialiseOwnedClient(): Promise<void> {
 
   // ── Disconnected ─────────────────────────────────────────────────────────
   _client.on("disconnected", (reason: string) => {
+    stopInitWatchdog();
     _lastDisconnectReason = reason;
     updateStatus("DISCONNECTED", { reason });
     console.warn("[WaJS] Disconnected:", reason);
@@ -612,9 +666,11 @@ async function initialiseOwnedClient(): Promise<void> {
     if (String((err as Error).message ?? err).includes("already running")) {
       await cleanupStaleBrowserLocks(sessionPath);
     }
-    _status = "DISCONNECTED";
-    emitRealtime("wajs:status", { status: _status });
-    await persistStatus();
+    stopInitWatchdog();
+    try { await _client?.destroy(); } catch { /* best-effort */ }
+    _client = null;
+    updateStatus("DISCONNECTED", { reason: "initialize_failed" });
     await releaseOwnerLock().catch(() => undefined);
+    scheduleInitRetry(INITIAL_RECONNECT_DELAY_MS);
   }
 }

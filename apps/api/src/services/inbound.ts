@@ -5,6 +5,7 @@ import { Message } from "../models/Message.js";
 import { ProcessedEvent } from "../models/ProcessedEvent.js";
 import { automationQueue } from "../queues/jobs.js";
 import { isOptOutMessage } from "./compliance.js";
+import { classifyLead } from "./leadClassifier.service.js";
 import { serializeLead, serializeMessage } from "./serializers.js";
 
 export async function processInboundMessage(job: {
@@ -86,6 +87,7 @@ export async function processInboundMessage(job: {
 
     emitRealtime("lead:update", serializeLead(lead));
     emitRealtime("message:new", serializeMessage(message));
+    classifyLead(lead._id.toString(), { type: "inbound_message", text: job.text }).catch(console.warn);
 
     if (!optedOut) {
       await automationQueue.add("welcome-followup", job, { delay: 1000 });

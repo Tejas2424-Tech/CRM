@@ -1,0 +1,99 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
+import type { LeadDTO } from "@crm/shared";
+import { api, type Session } from "../api";
+import { uniqueById } from "../utils";
+
+export type FilterState = { search: string; status: string; tag: string; assignedTo: string; unread: string };
+
+export function useLeads(session?: Session) {
+  const [leads, setLeads] = useState<LeadDTO[]>([]);
+  const [isLeadsLoading, setIsLeadsLoading] = useState(false);
+  const [selectedLeadId, setSelectedLeadId] = useState<string>();
+  const [filters, setFilters] = useState<FilterState>({ search: "", status: "", tag: "", assignedTo: "", unread: "" });
+  const [leadForm, setLeadForm] = useState({ name: "", phone: "", email: "" });
+  const [error, setError] = useState<string>();
+
+  const loadLeads = useCallback(() => {
+    if (!session) return;
+    setIsLeadsLoading(true);
+    api
+      .leads(session.token, filters)
+      .then((items) => {
+        setLeads(uniqueById(items));
+        setSelectedLeadId((cur) => cur ?? items[0]?.id);
+      })
+      .catch((err) => setError(err.message))
+      .finally(() => setIsLeadsLoading(false));
+  }, [session, filters]);
+
+  useEffect(() => {
+    loadLeads();
+  }, [loadLeads]);
+
+  const updateLead = useCallback(
+    async (lead: LeadDTO, patch: Partial<LeadDTO>) => {
+      if (!session) return;
+      try {
+        const payload: Record<string, any> = { ...patch };
+        if (payload.status) {
+          payload.stage = payload.status;
+          delete payload.status;
+        }
+        const updated = await api.updateLead(session.token, lead.id, payload as Partial<LeadDTO>);
+        setLeads((items) => items.map((i) => (i.id === updated.id ? updated : i)));
+      } catch (err: any) {
+        setError(err.message);
+      }
+    },
+    [session]
+  );
+
+  const createLead = useCallback(async () => {
+    if (!session || !leadForm.phone) return;
+    try {
+      const lead = await api.createLead(session.token, { ...leadForm, status: "new", tags: [], source: "manual" });
+      setLeads((items) => uniqueById([lead, ...items]));
+      setSelectedLeadId(lead.id);
+      setLeadForm({ name: "", phone: "", email: "" });
+      return lead;
+    } catch (err: any) {
+      setError(err.message);
+      throw err;
+    }
+  }, [session, leadForm]);
+
+  const socketEvents = useMemo(
+    () => [
+      {
+        event: "lead:new",
+        handler: (lead: any) => setLeads((items) => [lead as LeadDTO, ...items.filter((i) => i.id !== (lead as LeadDTO).id)]),
+      },
+      {
+        event: "lead:update",
+        handler: (lead: any) =>
+          setLeads((items) => {
+            if (!items.find((i) => i.id === lead.id)) return [lead, ...items];
+            return items.map((i) => (i.id === lead.id ? lead : i));
+          }),
+      },
+    ],
+    []
+  );
+
+  return {
+    leads,
+    isLeadsLoading,
+    selectedLeadId,
+    setSelectedLeadId,
+    filters,
+    setFilters,
+    leadForm,
+    setLeadForm,
+    updateLead,
+    createLead,
+    loadLeads,
+    socketEvents,
+    error,
+    setError,
+  };
+}

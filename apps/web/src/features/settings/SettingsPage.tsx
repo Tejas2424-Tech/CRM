@@ -1,19 +1,10 @@
 import { QRCodeSVG } from "qrcode.react";
 import { SectionTitle } from "../../components";
 
-interface Props {
-  waStatus: string;
-  waMetadata: { connectedAt?: string; lastDisconnectReason?: string; syncProgress?: { total: number; done: number } };
-  waQr: string | null;
-  waLogoutLoading: boolean;
-  crmResetState: string;
-  onLogout: () => void;
-  onSync: () => void;
-  onResetCrm: () => void;
-  canAdmin: boolean;
-}
+import { useCrm } from "../../context/CrmContext";
 
-export function SettingsPage({ waStatus, waMetadata, waQr, waLogoutLoading, crmResetState, onLogout, onSync, onResetCrm, canAdmin }: Props) {
+export function SettingsPage() {
+  const { whatsapp: { waStatus, waMetadata, waQr, waLogoutLoading, canSyncWhatsapp, handleWaLogout: onLogout, handleSyncWhatsapp: onSync }, auth: { canAdmin }, crmResetState, resetCrm: onResetCrm } = useCrm();
   const isConnected = waStatus === "CONNECTED";
   const isQrPending = waStatus === "QR_REQUIRED";
   const isSyncing = waStatus === "SYNCING" || waStatus === "HYDRATING";
@@ -80,7 +71,7 @@ export function SettingsPage({ waStatus, waMetadata, waQr, waLogoutLoading, crmR
         {isConnected && (
           <div style={{ marginTop: 16 }}>
             {waMetadata.connectedAt && <p style={{ fontSize: 11, color: "#666", marginBottom: 8 }}>Connected since: {new Date(waMetadata.connectedAt).toLocaleString()}</p>}
-            <button id="wa-sync-btn" onClick={onSync} style={{ padding: "7px 14px", borderRadius: 6, background: "transparent", color: "#25d366", border: "1px solid #25d366", cursor: "pointer", fontWeight: 600, fontSize: 13 }}>
+            <button id="wa-sync-btn" onClick={onSync} disabled={!canSyncWhatsapp} style={{ padding: "7px 14px", borderRadius: 6, background: "transparent", color: "#25d366", border: "1px solid #25d366", cursor: canSyncWhatsapp ? "pointer" : "not-allowed", fontWeight: 600, fontSize: 13, opacity: canSyncWhatsapp ? 1 : 0.55 }}>
               ↺  Re-sync Contacts & Chats
             </button>
           </div>

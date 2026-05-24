@@ -1,42 +1,82 @@
 import type { AgentDTO, LeadDTO, LeadStatus, MessageDTO, NoteDTO, TaskDTO } from "@crm/shared";
 import { Check, Search, Send } from "lucide-react";
+import { useEffect, useState } from "react";
+import type { KeyboardEvent } from "react";
 import { Empty, LeadAvatar, LeadNameBlock, MessageBubble, SectionTitle, agentName, formatPhone, stageLabels, windowText } from "../../components";
 import { mergeUniqueMessages, messageRenderKey, stages, uniqueById } from "../../utils";
 
-interface FilterState {
-  search: string;
-  status: string;
-  tag: string;
-  assignedTo: string;
-  unread: string;
-}
+import { useCrm } from "../../context/CrmContext";
 
-interface Props {
-  waStatus: "ready" | "busy" | "offline" | "unknown";
-  leads: LeadDTO[];
-  selectedLead?: LeadDTO;
-  selectedLeadId?: string;
-  messages: MessageDTO[];
-  notes: NoteDTO[];
-  tasks: TaskDTO[];
-  agents: AgentDTO[];
-  filters: FilterState;
-  reply: string;
-  noteBody: string;
-  taskForm: { title: string; dueAt: string; assignedTo: string };
-  setFilters: (f: FilterState) => void;
-  setSelectedLeadId: (id: string) => void;
-  setReply: (text: string) => void;
-  setNoteBody: (text: string) => void;
-  setTaskForm: (form: { title: string; dueAt: string; assignedTo: string }) => void;
-  updateLead: (lead: LeadDTO, patch: Partial<LeadDTO>) => void;
-  sendReply: () => void;
-  createNote: () => void;
-  createTask: () => void;
-}
+const emailPattern = /^(?!\.)(?!.*\.\.)([A-Za-z0-9_'+\-.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9-]*\.)+[A-Za-z]{2,}$/;
 
-export function Inbox(props: Props) {
+export function Inbox() {
+  const { auth, leads, inbox, tasks, whatsapp } = useCrm();
+  const selectedLead = leads.leads.find(l => l.id === leads.selectedLeadId);
+  const [draftLead, setDraftLead] = useState({ name: "", email: "", tags: "" });
+  const [emailError, setEmailError] = useState<string>();
+  
+  const props = {
+    waStatus: whatsapp.waUiStatus,
+    leads: leads.leads,
+    selectedLead,
+    selectedLeadId: leads.selectedLeadId,
+    messages: inbox.messages,
+    notes: inbox.notes,
+    tasks: tasks.tasks.filter(t => t.leadId === leads.selectedLeadId),
+    agents: auth.agents,
+    filters: leads.filters,
+    reply: inbox.reply,
+    noteBody: inbox.noteBody,
+    taskForm: tasks.taskForm,
+    setFilters: leads.setFilters,
+    setSelectedLeadId: leads.setSelectedLeadId,
+    setReply: inbox.setReply,
+    setNoteBody: inbox.setNoteBody,
+    setTaskForm: tasks.setTaskForm,
+    updateLead: leads.updateLead,
+    sendReply: inbox.sendReply,
+    createNote: inbox.createNote,
+    createTask: () => tasks.createTask(leads.selectedLeadId, selectedLead?.assignedTo),
+  };
   const lead = props.selectedLead;
+
+  useEffect(() => {
+    setDraftLead({
+      name: lead?.name ?? "",
+      email: lead?.email ?? "",
+      tags: lead?.tags.join(", ") ?? "",
+    });
+    setEmailError(undefined);
+  }, [lead?.id, lead?.name, lead?.email, lead?.tags]);
+
+  const saveDraftField = (field: "name" | "email" | "tags") => {
+    if (!lead) return;
+
+    if (field === "email") {
+      const email = draftLead.email.trim();
+      if (email && !emailPattern.test(email)) {
+        setEmailError("Enter a valid email address or leave it blank.");
+        return;
+      }
+      setEmailError(undefined);
+      if ((lead.email ?? "") !== email) props.updateLead(lead, { email });
+      return;
+    }
+
+    if (field === "name") {
+      const name = draftLead.name.trim();
+      if ((lead.name ?? "") !== name) props.updateLead(lead, { name });
+      return;
+    }
+
+    const tags = draftLead.tags.split(",").map((t) => t.trim()).filter(Boolean);
+    if (lead.tags.join(",") !== tags.join(",")) props.updateLead(lead, { tags });
+  };
+
+  const blurOnEnter = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key !== "Enter") return;
+    e.currentTarget.blur();
+  };
 
   return (
     <div className="inbox-grid">
@@ -142,14 +182,17 @@ export function Inbox(props: Props) {
         {lead ? (
           <>
             <SectionTitle title="Lead Details" />
-            <label>Name<input className="input" value={lead.name ?? ""} onChange={(e) => props.updateLead(lead, { name: e.target.value })} /></label>
-            <label>Email<input className="input" value={lead.email ?? ""} onChange={(e) => props.updateLead(lead, { email: e.target.value })} /></label>
+            <label>Name<input className="input" value={draftLead.name} onChange={(e) => setDraftLead((draft) => ({ ...draft, name: e.target.value }))} onBlur={() => saveDraftField("name")} onKeyDown={blurOnEnter} /></label>
+            <label>Email
+              <input className="input" value={draftLead.email} onChange={(e) => { setDraftLead((draft) => ({ ...draft, email: e.target.value })); setEmailError(undefined); }} onBlur={() => saveDraftField("email")} onKeyDown={blurOnEnter} />
+              {emailError && <span className="field-error">{emailError}</span>}
+            </label>
             <label>Stage
               <select className="input" value={lead.status} onChange={(e) => props.updateLead(lead, { status: e.target.value as LeadStatus })}>
                 {stages.map((s) => <option key={s} value={s}>{stageLabels[s]}</option>)}
               </select>
             </label>
-            <label>Tags<input className="input" value={lead.tags.join(", ")} onChange={(e) => props.updateLead(lead, { tags: e.target.value.split(",").map((t) => t.trim()).filter(Boolean) })} /></label>
+            <label>Tags<input className="input" value={draftLead.tags} onChange={(e) => setDraftLead((draft) => ({ ...draft, tags: e.target.value }))} onBlur={() => saveDraftField("tags")} onKeyDown={blurOnEnter} /></label>
             <div className="quick-actions">
               <button onClick={() => props.updateLead(lead, { status: "won" })}><Check size={15} /> Won</button>
               <button onClick={() => props.updateLead(lead, { status: "lost" })}>Lost</button>

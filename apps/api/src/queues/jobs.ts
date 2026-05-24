@@ -43,3 +43,10 @@ export const campaignQueue = new Queue<CampaignRecipientJob>("send-campaign-reci
 export const statusQueue = new Queue<StatusJob>("simulate-message-status", { connection: createRedisConnection(), defaultJobOptions: defaultOpts });
 export const automationQueue = new Queue<InboundJob>("run-automation", { connection: createRedisConnection(), defaultJobOptions: defaultOpts });
 export const syncQueue = new Queue<SyncJob>("whatsapp-sync", { connection: createRedisConnection(), defaultJobOptions: { ...defaultOpts, attempts: 1 } });
+
+export type LostLeadsJob = Record<string, never>;
+
+export const lostLeadsQueue = new Queue<LostLeadsJob>("recompute-lost-leads", {
+  connection: createRedisConnection(),
+  defaultJobOptions: { attempts: 1, removeOnComplete: true, removeOnFail: false }
+});

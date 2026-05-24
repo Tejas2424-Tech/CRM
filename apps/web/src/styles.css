@@ -22,6 +22,11 @@ button {
   cursor: pointer;
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .app-shell {
   display: grid;
   min-height: 100vh;
@@ -307,6 +312,12 @@ textarea.input {
   color: #697567;
   font-size: 12px;
   font-weight: 700;
+}
+
+.field-error {
+  color: #b42318;
+  font-size: 12px;
+  font-weight: 650;
 }
 
 .panel-tools {
@@ -706,4 +717,18 @@ textarea.input {
 
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+/* ── Skeleton loader ─────────────────────────────────────────────────────── */
+@keyframes shimmer {
+  0%   { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+
+.skeleton {
+  background: linear-gradient(90deg, #e6ebe3 25%, #f0f4ee 50%, #e6ebe3 75%);
+  background-size: 800px 100%;
+  animation: shimmer 1.4s ease-in-out infinite;
+  border-radius: 4px;
+  display: block;
 }
