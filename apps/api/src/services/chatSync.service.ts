@@ -28,8 +28,9 @@ import { normalizePhone } from "../utils/phone.js";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
-/** Maximum messages fetched per chat on initial sync */
-const INITIAL_MSG_LIMIT = 100;
+/** Maximum messages fetched per chat on full sync. whatsapp-web.js supports Infinity. */
+const INITIAL_MSG_LIMIT = Infinity;
+const debugMessageSync = process.env.MESSAGE_SYNC_DEBUG === "1";
 
 /**
  * Milliseconds to wait between each chat so we don't hammer the WhatsApp Web
@@ -175,17 +176,20 @@ export async function syncContact(
 export async function syncChatMessages(
   client: IWajsClient,
   chat: WajsChat,
-  lead: { _id: unknown; phone: string }
+  lead: { _id: unknown; phone: string },
+  opts: { messageLimit?: number } = {}
 ) {
   let rawMessages: WajsMessage[] = [];
+  const msgLimit = opts.messageLimit ?? INITIAL_MSG_LIMIT;
   try {
-    rawMessages = await chat.fetchMessages({ limit: INITIAL_MSG_LIMIT });
+    rawMessages = await chat.fetchMessages({ limit: msgLimit });
   } catch (err) {
     console.warn(`[ChatSync] fetchMessages failed for ${chat.id._serialized}:`, err);
     return [];
   }
 
   const saved: Array<{ id: string }> = [];
+  let duplicateCount = 0;
 
   for (const raw of rawMessages) {
     const waMessageId = raw.id._serialized;
@@ -195,7 +199,7 @@ export async function syncChatMessages(
 
     try {
       // insertOne with ignoring duplicate key error = safe upsert without fetching first
-      await Message.updateOne(
+      const result = await Message.updateOne(
         { waMessageId },
         {
           $setOnInsert: {
@@ -212,11 +216,14 @@ export async function syncChatMessages(
         },
         { upsert: true }
       );
-      saved.push({ id: waMessageId });
+      if (result.upsertedCount > 0) saved.push({ id: waMessageId });
+      else duplicateCount++;
     } catch (err: any) {
       // E11000 = duplicate key — safe to ignore, message already exists
       if (err?.code !== 11000) {
         console.warn(`[ChatSync] Failed to upsert message ${waMessageId}:`, err);
+      } else {
+        duplicateCount++;
       }
     }
   }
@@ -224,6 +231,11 @@ export async function syncChatMessages(
   console.log(
     `[ChatSync] messages synced for ${lead.phone}: ${saved.length}/${rawMessages.length} new`
   );
+  if (debugMessageSync) {
+    console.log(
+      `[MessageSync][ChatSync] chat=${chat.id._serialized} fetched=${rawMessages.length} stored=${saved.length} skipped=${duplicateCount} limit=${msgLimit}`
+    );
+  }
   return saved;
 }
 
@@ -336,6 +348,7 @@ export async function syncAllChats(
       }
 
       let newMsgCount = 0;
+      let duplicateCount = 0;
       for (const raw of rawMessages) {
         const waMessageId = raw.id._serialized;
         const direction = raw.fromMe ? "out" : "in";
@@ -361,9 +374,12 @@ export async function syncAllChats(
             { upsert: true }
           );
           if (result.upsertedCount > 0) newMsgCount++;
+          else duplicateCount++;
         } catch (err: any) {
           if (err?.code !== 11000) {
             console.warn(`[ChatSync] msg upsert error ${waMessageId}:`, err);
+          } else {
+            duplicateCount++;
           }
         }
       }
@@ -371,10 +387,15 @@ export async function syncAllChats(
       console.log(
         `[ChatSync] ✓ ${chat.id._serialized}: ${newMsgCount} new messages stored`
       );
+      if (debugMessageSync) {
+        console.log(
+          `[MessageSync][ChatSync] chat=${chat.id._serialized} fetched=${rawMessages.length} stored=${newMsgCount} skipped=${duplicateCount} limit=${msgLimit}`
+        );
+      }
 
       // ── 5. Emit real-time updates ───────────────────────────────────────
-      emitRealtime("contact:updated", serializeLead(lead));
-      emitRealtime("chat:synced", {
+      emitRealtime("lead:update", serializeLead(lead));
+      emitRealtime("message:sync_complete", {
         chatId: chat.id._serialized,
         leadId: lead._id.toString(),
         newMessages: newMsgCount,

@@ -36,13 +36,19 @@ webhookRouter.post("/", async (req, res) => {
     console.log(`[Webhook] Meta: enqueuing ${messages.length} inbound message(s)`);
     await Promise.all(
       messages.map((msg) =>
-        inboundQueue.add("meta-inbound", {
-          waMessageId: msg.waMessageId,
-          phone: msg.phone,
-          name: msg.name,
-          text: msg.text,
-          timestamp: msg.timestamp
-        })
+        inboundQueue
+          .add("meta-inbound", {
+            waMessageId: msg.waMessageId,
+            phone: msg.phone,
+            name: msg.name,
+            text: msg.text,
+            timestamp: msg.timestamp
+          })
+          .then(() => {
+            if (process.env.MESSAGE_SYNC_DEBUG === "1") {
+              console.log(`[MessageSync][Webhook] queued source=meta waMessageId=${msg.waMessageId} phone=${msg.phone}`);
+            }
+          })
       )
     );
   } catch (err) {
@@ -73,6 +79,9 @@ webhookRouter.post("/whatsapp", async (req, res) => {
   console.log(`[Webhook] Mock inbound: ${phone} → "${text.slice(0, 60)}"`);
 
   await inboundQueue.add("mock-inbound", { waMessageId, phone, name, text, timestamp });
+  if (process.env.MESSAGE_SYNC_DEBUG === "1") {
+    console.log(`[MessageSync][Webhook] queued source=mock waMessageId=${waMessageId} phone=${phone}`);
+  }
   res.json({ queued: true, waMessageId });
 });
 

@@ -8,6 +8,8 @@ import { isOptOutMessage } from "./compliance.js";
 import { classifyLead } from "./leadClassifier.service.js";
 import { serializeLead, serializeMessage } from "./serializers.js";
 
+const debugMessageSync = process.env.MESSAGE_SYNC_DEBUG === "1";
+
 export async function processInboundMessage(job: {
   waMessageId: string;
   phone: string;
@@ -53,7 +55,7 @@ export async function processInboundMessage(job: {
 
     let message;
     try {
-      await Message.updateOne(
+      const result = await Message.updateOne(
         { waMessageId: job.waMessageId },
         {
           $setOnInsert: {
@@ -68,6 +70,11 @@ export async function processInboundMessage(job: {
         },
         { upsert: true }
       );
+      if (debugMessageSync) {
+        console.log(
+          `[MessageSync][Inbound] waMessageId=${job.waMessageId} lead=${lead._id.toString()} upserted=${result.upsertedCount}`
+        );
+      }
       message = await Message.findOne({ waMessageId: job.waMessageId });
     } catch (err: any) {
       if (err?.code !== 11000) throw err;

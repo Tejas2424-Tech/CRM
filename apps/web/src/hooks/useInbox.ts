@@ -9,24 +9,55 @@ export function useInbox(session: Session | undefined, selectedLeadId: string | 
   const [reply, setReply] = useState("");
   const [noteBody, setNoteBody] = useState("");
   const [error, setError] = useState<string>();
+  const debugMessageSync = import.meta.env.DEV && localStorage.getItem("crm:debug:message-sync") === "1";
+
+  const loadMessages = useCallback(
+    async (leadId: string) => {
+      if (!session) return;
+      const fetched = await api.messages(session.token, leadId);
+      if (debugMessageSync) {
+        console.debug(`[MessageSync][Inbox] lead=${leadId} fetched=${fetched.length}`);
+      }
+      setMessages((current) =>
+        mergeUniqueMessages(
+          fetched,
+          current.filter((msg) => msg.leadId === leadId)
+        )
+      );
+    },
+    [session, debugMessageSync]
+  );
 
   useEffect(() => {
     if (!session || !selectedLeadId) return;
     const leadId = selectedLeadId;
+    let cancelled = false;
     // Always reset messages when switching leads, then populate from API
     setMessages([]);
     api
       .messages(session.token, leadId)
       .then((fetched) => {
+        if (cancelled) return;
+        if (debugMessageSync) {
+          console.debug(`[MessageSync][Inbox] lead=${leadId} fetched=${fetched.length}`);
+        }
         setMessages((current) => mergeUniqueMessages(fetched, current.filter((msg) => msg.leadId === leadId)));
       })
       .catch((err) => setError(err.message));
     
     api
       .notes(session.token, leadId)
-      .then((items) => setNotes(uniqueById(items)))
-      .catch(() => setNotes([]));
-  }, [session, selectedLeadId]);
+      .then((items) => {
+        if (!cancelled) setNotes(uniqueById(items));
+      })
+      .catch(() => {
+        if (!cancelled) setNotes([]);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [session, selectedLeadId, debugMessageSync]);
 
   const sendReply = useCallback(async () => {
     if (!session || !selectedLeadId || !reply.trim()) return;
@@ -57,14 +88,30 @@ export function useInbox(session: Session | undefined, selectedLeadId: string | 
     () => [
       {
         event: "message:new",
-        handler: (message: any) => setMessages((items) => mergeUniqueMessages(items, [message as MessageDTO])),
+        handler: (message: any) => {
+          const incoming = message as MessageDTO;
+          if (incoming.leadId !== selectedLeadId) return;
+          setMessages((items) => mergeUniqueMessages(items.filter((msg) => msg.leadId === selectedLeadId), [incoming]));
+        },
       },
       {
         event: "message:status",
-        handler: (message: any) => setMessages((items) => mergeUniqueMessages(items, [message as MessageDTO])),
+        handler: (message: any) => {
+          const incoming = message as MessageDTO;
+          if (incoming.leadId !== selectedLeadId) return;
+          setMessages((items) => mergeUniqueMessages(items.filter((msg) => msg.leadId === selectedLeadId), [incoming]));
+        },
+      },
+      {
+        event: "message:sync_complete",
+        handler: (payload: any) => {
+          const event = payload as { leadId?: string; newMessages?: number };
+          if (!selectedLeadId || event.leadId !== selectedLeadId) return;
+          loadMessages(selectedLeadId).catch((err) => setError(err.message));
+        },
       },
     ],
-    []
+    [loadMessages, selectedLeadId]
   );
 
   return {

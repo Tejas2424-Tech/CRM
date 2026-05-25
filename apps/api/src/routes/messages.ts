@@ -12,9 +12,33 @@ export const messagesRouter = Router();
 
 messagesRouter.use(requireAuth);
 
+const DEFAULT_MESSAGE_FETCH_LIMIT = 5000;
+const MAX_MESSAGE_FETCH_LIMIT = 20000;
+
+function messageFetchLimit(value: unknown) {
+  const configured = Number(process.env.MESSAGE_FETCH_LIMIT ?? DEFAULT_MESSAGE_FETCH_LIMIT);
+  const fallback = Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_MESSAGE_FETCH_LIMIT;
+  const requested = typeof value === "string" ? Number(value) : fallback;
+  const limit = Number.isFinite(requested) && requested > 0 ? requested : fallback;
+  return Math.min(Math.trunc(limit), MAX_MESSAGE_FETCH_LIMIT);
+}
+
 messagesRouter.get("/:leadId", async (req, res) => {
-  const messages = await Message.find({ leadId: req.params.leadId }).sort({ timestamp: 1 }).limit(500);
-  res.json(messages.map(serializeMessage));
+  const limit = messageFetchLimit(req.query.limit);
+  const messages = await Message.find({ leadId: req.params.leadId })
+    .sort({ timestamp: -1, _id: -1 })
+    .limit(limit);
+  const ordered = messages.reverse();
+
+  if (process.env.MESSAGE_SYNC_DEBUG === "1") {
+    const first = ordered[0]?.timestamp.toISOString();
+    const last = ordered[ordered.length - 1]?.timestamp.toISOString();
+    console.log(
+      `[MessageSync][API] lead=${req.params.leadId} count=${ordered.length} limit=${limit} range=${first ?? "none"}..${last ?? "none"}`
+    );
+  }
+
+  res.json(ordered.map(serializeMessage));
 });
 
 messagesRouter.post("/send", async (req, res) => {

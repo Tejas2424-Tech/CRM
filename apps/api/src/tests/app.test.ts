@@ -17,6 +17,7 @@ import { Task } from "../models/Task.js";
 import { Template } from "../models/Template.js";
 import { processInboundMessage } from "../services/inbound.js";
 import { runAutomation } from "../services/automation.js";
+import { syncChatMessages, type WajsChat, type WajsMessage } from "../services/chatSync.service.js";
 import { seedDefaults } from "../seed.js";
 
 vi.mock("../queues/jobs.js", () => ({
@@ -108,6 +109,54 @@ describe("Messaging CRM API", () => {
       .send({ leadId: lead._id.toString(), text: "Hello" });
     expect(res.status).toBe(200);
     expect(res.body.message.status).toBe("queued");
+  });
+
+  it("returns the newest lead messages in chronological order when limited", async () => {
+    const lead = await Lead.create({ phone: "15551234567", consent: { optedIn: true }, lastActivity: new Date() });
+    const base = new Date("2026-01-01T00:00:00.000Z").getTime();
+    const messages = Array.from({ length: 520 }, (_, index) => ({
+      leadId: lead._id,
+      direction: "in" as const,
+      type: "text" as const,
+      content: `msg-${String(index).padStart(3, "0")}`,
+      status: "read" as const,
+      fromMe: false,
+      timestamp: new Date(base + index * 1000)
+    }));
+    await Message.insertMany(messages);
+
+    const res = await request(app)
+      .get(`/api/messages/${lead._id.toString()}?limit=500`)
+      .set("Authorization", `Bearer ${token("admin")}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(500);
+    expect(res.body[0].text).toBe("msg-020");
+    expect(res.body[499].text).toBe("msg-519");
+    expect(new Date(res.body[0].timestamp).getTime()).toBeLessThan(new Date(res.body[499].timestamp).getTime());
+  });
+
+  it("syncs more than 100 WhatsApp history messages for a chat", async () => {
+    const lead = await Lead.create({ phone: "15551234567", consent: { optedIn: true }, lastActivity: new Date() });
+    const rawMessages: WajsMessage[] = Array.from({ length: 125 }, (_, index) => ({
+      id: { _serialized: `wa-sync-${index}` },
+      from: "15551234567@c.us",
+      to: "me@c.us",
+      body: `history-${index}`,
+      type: "chat",
+      timestamp: 1_767_225_600 + index,
+      fromMe: false
+    }));
+    const chat = {
+      id: { _serialized: "15551234567@c.us" },
+      fetchMessages: vi.fn().mockResolvedValue(rawMessages)
+    } as unknown as WajsChat;
+
+    const saved = await syncChatMessages({} as any, chat, { _id: lead._id, phone: lead.phone });
+
+    expect(chat.fetchMessages).toHaveBeenCalledWith({ limit: Infinity });
+    expect(saved).toHaveLength(125);
+    expect(await Message.countDocuments({ leadId: lead._id })).toBe(125);
   });
 
   it("creates campaign recipients only for opted-in audience members", async () => {

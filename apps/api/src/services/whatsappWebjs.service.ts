@@ -651,6 +651,9 @@ async function initialiseOwnedClient(): Promise<void> {
         backoff: { type: "exponential", delay: 1000 }
       });
 
+      if (process.env.MESSAGE_SYNC_DEBUG === "1") {
+        console.log(`[MessageSync][WaJS] queued waMessageId=${waMessageId} phone=${phone}`);
+      }
       console.log(`[WaJS] ✓ queued inbound job for ${phone} (msg: ${waMessageId})`);
     } catch (err) {
       console.error("[WaJS] Failed to process incoming message:", err);
