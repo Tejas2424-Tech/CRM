@@ -52,3 +52,13 @@ usersRouter.patch("/:id", requireRole("admin"), async (req, res) => {
 
   res.json(serializeUser(user));
 });
+
+usersRouter.delete("/:id", requireRole("admin"), async (req, res) => {
+  const before = await User.findById(req.params.id);
+  if (!before) return res.status(404).json({ error: "User not found" });
+
+  await User.findByIdAndDelete(req.params.id);
+  await audit(req.user!.id, "user.delete", "User", before._id.toString(), serializeUser(before), undefined);
+
+  res.json({ success: true });
+});

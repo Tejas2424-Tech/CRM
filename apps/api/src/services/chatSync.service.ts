@@ -28,15 +28,15 @@ import { normalizePhone } from "../utils/phone.js";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
-/** Maximum messages fetched per chat on full sync. whatsapp-web.js supports Infinity. */
-const INITIAL_MSG_LIMIT = Infinity;
+/** Maximum messages fetched per chat on full sync. Capped to avoid multi-second blocks on heavy chats. */
+const INITIAL_MSG_LIMIT = 100;
 const debugMessageSync = process.env.MESSAGE_SYNC_DEBUG === "1";
 
 /**
  * Milliseconds to wait between each chat so we don't hammer the WhatsApp Web
  * connection with hundreds of simultaneous requests.
  */
-const INTER_CHAT_DELAY_MS = 200;
+const INTER_CHAT_DELAY_MS = 50; // Small throttle to avoid hammering WA Web
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -255,36 +255,28 @@ export async function syncAllChats(
   // Try to acquire distributed lock for 5 minutes
   const lock = await redisConnection.set("sync_lock:whatsapp", "locked", "EX", 300, "NX");
   if (!lock) {
-    console.warn("[ChatSync] Sync aborted — another sync is currently running (lock active).");
+    console.warn("[HistorySync] Sync aborted — another sync is currently running (lock active).");
     return;
   }
 
   const msgLimit = opts.messageLimit ?? INITIAL_MSG_LIMIT;
-  console.log("[ChatSync] Starting full chat sync…");
+  console.log("[HistorySync] Sync started");
   emitRealtime("sync:started", { at: new Date().toISOString() });
 
-  try {
-    const state = await client.getState();
-    if (state !== "CONNECTED") {
-      console.log("[ChatSync] Client not stable yet (state: " + state + "). Aborting sync.");
-      await redisConnection.del("sync_lock:whatsapp");
-      return;
-    }
-  } catch (err) {
-    console.warn("[ChatSync] Could not fetch client state:", err);
-  }
+  // We trust that if sync is called, the client is ready.
+  // whatsapp-web.js getState() can sometimes return null or throw prematurely.
 
   let chats: WajsChat[] = [];
   try {
     chats = await client.getChats();
   } catch (err) {
-    console.error("[ChatSync] getChats() failed — aborting sync:", err);
+    console.error("[HistorySync] getChats() failed — aborting sync:", err);
     emitRealtime("sync:error", { error: String(err) });
     await redisConnection.del("sync_lock:whatsapp");
     return;
   }
 
-  console.log(`[ChatSync] ${chats.length} total chats found`);
+  console.log(`[HistorySync] Found ${chats.length} chats`);
 
   // Filter: private chats only for Phase 1 (skip groups & broadcasts)
   const privateChats = chats.filter(
@@ -295,7 +287,7 @@ export async function syncAllChats(
       !chat.id._serialized.endsWith("@newsletter")
   );
 
-  console.log(`[ChatSync] ${privateChats.length} private chats to sync`);
+  console.log(`[HistorySync] ${privateChats.length} private chats to sync`);
   emitRealtime("sync:progress", { total: privateChats.length, done: 0 });
 
   let done = 0;
@@ -306,20 +298,41 @@ export async function syncAllChats(
       // ── 1. Resolve contact (Lightweight) ────────────────────────────────
       const contactId = chat.id?._serialized;
 
-      if (contactId && contactId.endsWith("@lid")) {
-        console.log(`[ChatSync] Skipping unstable @lid contact: ${contactId}`);
-        continue;
-      }
+      // WhatsApp LID (@lid) is the new privacy-preserving identifier.
+      // Most chats now use it. We import them using chat.name as the
+      // display name and a "lid:<numericId>" phone key so they get a
+      // stable, unique Lead record without requiring a real phone number.
+      const isLid = contactId?.endsWith("@lid") ?? false;
 
       const cAny = chat as any;
-      const pushName = cAny.pushname || cAny.formattedTitle;
+      const pushName = cAny.pushname || cAny.formattedTitle || chat.name;
+
+      // For @lid chats: use "lid:<numericId>" as the phone key.
+      // For normal chats: use the number before the "@" suffix.
+      const phoneKey = isLid
+        ? `lid:${contactId!.split("@")[0]}`
+        : (contactId ? contactId.split("@")[0] : "unknown");
+
+      let waContact: any = null;
+      try {
+        waContact = await chat.getContact();
+      } catch (e) {
+        console.warn(`[ChatSync] Failed to get contact for ${contactId}`);
+      }
 
       const contact: WajsContact = {
-        number: contactId ? contactId.split('@')[0] : "unknown",
-        pushname: pushName,
-        name: chat.name,
-        isMyContact: false,
-        getProfilePicUrl: async () => undefined
+        number: phoneKey,
+        pushname: waContact?.pushname || pushName,
+        name: waContact?.name || chat.name,
+        isMyContact: waContact?.isMyContact || false,
+        getProfilePicUrl: async () => {
+          if (!waContact) return undefined;
+          try {
+            return await waContact.getProfilePicUrl();
+          } catch {
+            return undefined;
+          }
+        }
       };
 
       const lastMessageAt = chat.timestamp ? new Date(chat.timestamp * 1000) : new Date();
@@ -337,6 +350,7 @@ export async function syncAllChats(
         { $set: { lastMessage: lastMsg || "[media]" } },
         { upsert: true }
       );
+      console.log(`[HistorySync] Chat imported: ${chat.id._serialized} (${lead.phone})`);
 
       // ── 4. Fetch and persist historical messages ────────────────────────
       const msgOpts = { limit: msgLimit };
@@ -385,7 +399,7 @@ export async function syncAllChats(
       }
 
       console.log(
-        `[ChatSync] ✓ ${chat.id._serialized}: ${newMsgCount} new messages stored`
+        `[HistorySync] Messages imported for ${lead.phone}: ${newMsgCount} new / ${rawMessages.length} fetched`
       );
       if (debugMessageSync) {
         console.log(
@@ -414,10 +428,21 @@ export async function syncAllChats(
   }
 
   console.log(
-    `[ChatSync] ✅ Sync complete — ${done}/${privateChats.length} chats, ${errors.length} errors`
+    `[HistorySync] Sync complete — ${done}/${privateChats.length} chats, ${errors.length} errors`
   );
 
   await redisConnection.del("sync_lock:whatsapp");
+
+  // Final document counts for verification
+  try {
+    const [convCount, msgCount] = await Promise.all([
+      Conversation.countDocuments(),
+      Message.countDocuments(),
+    ]);
+    console.log(`[HistorySync] DB totals — conversations: ${convCount}, messages: ${msgCount}`);
+  } catch (err) {
+    console.warn("[HistorySync] Could not fetch DB counts:", err);
+  }
 
   emitRealtime("sync:complete", {
     total: privateChats.length,

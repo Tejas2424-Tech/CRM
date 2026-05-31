@@ -4,6 +4,10 @@
  */
 
 export function normalizePhone(raw: string): string {
+  // Pass-through for WhatsApp LID synthetic keys ("lid:<numericId>").
+  // These are privacy-preserving identifiers, not real phone numbers.
+  if (raw.startsWith("lid:")) return raw;
+
   // 1. Remove all non-numeric characters (including whitespace, dashes, pluses)
   const digitsOnly = raw.replace(/\D/g, "");
   

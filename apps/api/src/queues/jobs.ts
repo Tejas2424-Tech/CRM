@@ -4,6 +4,7 @@ import { createRedisConnection } from "./connection.js";
 export type InboundJob = {
   waMessageId: string;
   phone: string;
+  chatId?: string;
   name?: string;
   text: string;
   timestamp?: string;
@@ -26,7 +27,8 @@ export type StatusJob = {
 };
 
 export type SyncJob = {
-  // Empty payload for now, triggers full sync
+  /** Which progressive-sync phase triggered this job (1 = T+30s, 2 = T+2min, 3 = T+5min) */
+  phase?: number;
 };
 
 const defaultOpts = { attempts: 5, backoff: { type: "exponential", delay: 2000 }, removeOnComplete: true, removeOnFail: false };

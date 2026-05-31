@@ -45,6 +45,10 @@ const envSchema = z.object({
   WA_SESSION_PATH: z.string().default("./src/sessions"),
   WA_HEADLESS: z.string().default("true"),
 
+  // History sync: delay (ms) after "ready" before Phase 1 sync starts.
+  // Allows WhatsApp Web to hydrate chats before we query them.
+  WHATSAPP_HISTORY_SYNC_DELAY_MS: z.coerce.number().default(30_000),
+
   // Rate limiting (requests per window per IP)
   RATE_LIMIT_WINDOW_MS: z.coerce.number().default(60_000),
   RATE_LIMIT_MAX: z.coerce.number().default(120)

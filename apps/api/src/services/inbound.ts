@@ -13,6 +13,7 @@ const debugMessageSync = process.env.MESSAGE_SYNC_DEBUG === "1";
 export async function processInboundMessage(job: {
   waMessageId: string;
   phone: string;
+  chatId?: string;
   name?: string;
   text: string;
   timestamp?: string;
@@ -37,6 +38,7 @@ export async function processInboundMessage(job: {
       {
         $set: {
           ...(job.name ? { name: job.name } : {}),
+          ...(job.chatId ? { chatId: job.chatId } : {}),
           lastActivity: timestamp,
           lastInboundAt: timestamp,
           windowExpiresAt,

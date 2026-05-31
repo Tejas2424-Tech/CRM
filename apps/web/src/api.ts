@@ -115,6 +115,8 @@ export const api = {
     requestJson<AgentDTO>("/api/users", token, { method: "POST", body: JSON.stringify(body) }),
   updateUser: (token: string, id: string, body: { name?: string; role?: AgentDTO["role"]; active?: boolean; capacity?: number }) =>
     requestJson<AgentDTO>(`/api/users/${id}`, token, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteUser: (token: string, id: string) =>
+    requestJson<{ success: boolean }>(`/api/users/${id}`, token, { method: "DELETE" }),
   campaigns: (token: string) => requestJson<CampaignDTO[]>("/api/campaigns", token),
   createCampaign: (token: string, body: { name: string; templateId: string; audienceQuery: Record<string, string>; scheduledAt?: string }) =>
     requestJson<CampaignDTO>("/api/campaigns", token, { method: "POST", body: JSON.stringify(body) }),

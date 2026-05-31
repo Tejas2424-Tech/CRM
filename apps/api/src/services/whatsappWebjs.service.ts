@@ -58,7 +58,7 @@ export type WajsStatus =
 const STATUS_STALE_MS = 3 * 60_000; // 3 minutes
 const STATUS_TTL_SECONDS = Math.ceil(STATUS_STALE_MS / 1000) + 60;
 const OWNER_LOCK_RETRY_MS = OWNER_LOCK_TTL_SECONDS * 1000 + 5000;
-const INIT_WATCHDOG_MS = 2 * 60_000;
+const INIT_WATCHDOG_MS = 5 * 60_000; // 5 min — session loading on large accounts can take 2-3 min
 
 let _status: WajsStatus = "BOOTING"; // Process just started — not INITIALISING yet
 let _connectedAt: Date | null = null;
@@ -329,28 +329,50 @@ async function cleanupStaleBrowserLocks(sessionPath: string) {
 /**
  * Resolves when the client is CONNECTED.
  * Throws if it times out or transitions to a terminal failure state.
+ *
+ * Works correctly from ANY process (API or worker):
+ *  - If called from the API process (_status is live), uses in-memory value.
+ *  - If called from the worker process (_status is BOOTING), falls back to
+ *    Redis via getWajsMetadataSnapshot() to read the authoritative status.
  */
 export async function waitForWhatsAppReady(timeoutMs = 60000): Promise<void> {
+  // Fast-path: in-memory state is already live in this process
   if (_status === "CONNECTED" || _status === "SYNCING") return;
 
+  const start = Date.now();
+
+  const checkOnce = async (): Promise<"connected" | "failed" | "timeout" | "waiting"> => {
+    // Prefer in-memory if this process owns the client
+    let status: WajsStatus = _status;
+    if (status === "BOOTING" || status === "UNKNOWN") {
+      // This is likely a worker process — read authoritative status from Redis
+      try {
+        const snap = await getWajsMetadataSnapshot();
+        status = snap.status;
+      } catch {
+        // Redis read failed; keep local status
+      }
+    }
+
+    if (status === "CONNECTED" || status === "SYNCING") return "connected";
+    if (status === "FAILED") return "failed";
+    if (Date.now() - start > timeoutMs) return "timeout";
+    return "waiting";
+  };
+
   return new Promise((resolve, reject) => {
-    const start = Date.now();
-    const check = () => {
-      if (_status === "CONNECTED" || _status === "SYNCING") {
-        resolve();
-        return;
+    const poll = async () => {
+      const result = await checkOnce();
+      if (result === "connected") return resolve();
+      if (result === "failed") return reject(new Error("WhatsApp client failed to initialize"));
+      if (result === "timeout") {
+        // Read status one more time for the error message
+        const snap = await getWajsMetadataSnapshot().catch(() => ({ status: _status }));
+        return reject(new Error(`Timeout waiting for WhatsApp connection (current status: ${snap.status})`));
       }
-      if (_status === "FAILED") {
-        reject(new Error("WhatsApp client failed to initialize"));
-        return;
-      }
-      if (Date.now() - start > timeoutMs) {
-        reject(new Error(`Timeout waiting for WhatsApp connection (current status: ${_status})`));
-        return;
-      }
-      setTimeout(check, 500);
+      setTimeout(poll, 500);
     };
-    check();
+    void poll();
   });
 }
 
@@ -491,7 +513,7 @@ async function initialiseOwnedClient(): Promise<void> {
     }),
     puppeteer: {
       headless: env.WA_HEADLESS !== "false",
-      protocolTimeout: 120000,
+      protocolTimeout: 300000, // 5 min — match the watchdog so Puppeteer doesn't time out first
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
@@ -529,18 +551,39 @@ async function initialiseOwnedClient(): Promise<void> {
     updateStatus("HYDRATING");
     console.log("[WaJS] Client is ready. Waiting for hydration…");
 
-    // Phase 1: Hydration / Initial Sync
     try {
       updateStatus("CONNECTED");
-      console.log("[WaJS] Client is CONNECTED. Dispatching background sync job...");
+      console.log("[WaJS] Client is CONNECTED ✅");
 
       const { syncQueue } = await import("../queues/jobs.js");
-      await syncQueue.add("auto-sync", {}, { delay: 15000 }); // Delay 15s to let WhatsApp Web stabilize
-      console.log("[WaJS] Phase 1 chat sync complete. Client CONNECTED ✅");
+
+      // Progressive sync — WhatsApp Web hydrates chats in waves.
+      await syncQueue.add("whatsapp-sync", { phase: 1 }, {
+        delay: 5000, // 5 seconds
+        jobId: "history-sync-1",
+        removeOnComplete: true,
+        removeOnFail: false,
+      });
+      await syncQueue.add("whatsapp-sync", { phase: 2 }, {
+        delay: 30000, // 30 seconds
+        jobId: "history-sync-2",
+        removeOnComplete: true,
+        removeOnFail: false,
+      });
+      await syncQueue.add("whatsapp-sync", { phase: 3 }, {
+        delay: 60000, // 60 seconds
+        jobId: "history-sync-3",
+        removeOnComplete: true,
+        removeOnFail: false,
+      });
+
+      console.log(
+        `[HistorySync] Scheduled 3 progressive sync phases: Phase 1 in 5s, Phase 2 in 30s, Phase 3 in 60s`
+      );
     } catch (err) {
-      console.error("[WaJS] Hydration/Sync failed:", err);
-      // We still transition to CONNECTED to unblock outbound, but with a warning
-      updateStatus("CONNECTED", { warning: "Sync partial" });
+      console.error("[WaJS] Failed to schedule history sync jobs:", err);
+      // Still CONNECTED — outbound messages can still be sent
+      updateStatus("CONNECTED", { warning: "History sync scheduling failed" });
     }
   });
 
@@ -640,6 +683,7 @@ async function initialiseOwnedClient(): Promise<void> {
       await inboundQueue.add("whatsapp-inbound", {
         waMessageId,
         phone,
+        chatId: msg.from,
         name,
         text,
         timestamp: new Date().toISOString()

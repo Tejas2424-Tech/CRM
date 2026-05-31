@@ -1,5 +1,5 @@
 import type { AgentDTO } from "@crm/shared";
-import { Plus } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { SectionTitle } from "../../components";
 import { initials } from "../../utils";
@@ -30,6 +30,17 @@ export function TeamPage() {
     try {
       const updated = await api.updateUser(auth.session.token, agent.id, { role });
       auth.setAgents((items) => items.map((i) => (i.id === updated.id ? updated : i)));
+    } catch (err: any) {
+      setGlobalError(err.message);
+    }
+  };
+
+  const deleteUser = async (agent: AgentDTO) => {
+    if (!auth.session || !auth.canAdmin) return;
+    if (!window.confirm(`Are you sure you want to permanently delete user "${agent.name}"?`)) return;
+    try {
+      await api.deleteUser(auth.session.token, agent.id);
+      auth.setAgents((items) => items.filter((i) => i.id !== agent.id));
     } catch (err: any) {
       setGlobalError(err.message);
     }
@@ -71,6 +82,16 @@ export function TeamPage() {
                 <span className="chip">{agent.role}</span>
               )}
               <p>{leads.leads.filter((l) => l.assignedTo === agent.id).length} assigned leads</p>
+              {auth.canAdmin && (
+                <button
+                  className="icon-button"
+                  style={{ color: "var(--danger, #dc2626)", marginTop: 8 }}
+                  onClick={() => deleteUser(agent)}
+                  title="Delete User"
+                >
+                  <Trash2 size={16} /> Delete
+                </button>
+              )}
             </article>
           ))}
         </div>

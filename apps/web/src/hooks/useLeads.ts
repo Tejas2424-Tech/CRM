@@ -66,14 +66,26 @@ export function useLeads(session?: Session) {
     () => [
       {
         event: "lead:new",
-        handler: (lead: any) => setLeads((items) => [lead as LeadDTO, ...items.filter((i) => i.id !== (lead as LeadDTO).id)]),
+        handler: (lead: any) =>
+          setLeads((items) => {
+            const others = items.filter((i) => i.id !== (lead as LeadDTO).id);
+            return [lead as LeadDTO, ...others].sort((a, b) => {
+              const aTime = a.lastActivity ? new Date(a.lastActivity).getTime() : 0;
+              const bTime = b.lastActivity ? new Date(b.lastActivity).getTime() : 0;
+              return bTime - aTime;
+            });
+          }),
       },
       {
         event: "lead:update",
         handler: (lead: any) =>
           setLeads((items) => {
-            if (!items.find((i) => i.id === lead.id)) return [lead, ...items];
-            return items.map((i) => (i.id === lead.id ? lead : i));
+            const others = items.filter((i) => i.id !== lead.id);
+            return [lead, ...others].sort((a, b) => {
+              const aTime = a.lastActivity ? new Date(a.lastActivity).getTime() : 0;
+              const bTime = b.lastActivity ? new Date(b.lastActivity).getTime() : 0;
+              return bTime - aTime;
+            });
           }),
       },
     ],

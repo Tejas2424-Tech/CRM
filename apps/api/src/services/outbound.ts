@@ -8,7 +8,7 @@ import { statusQueue } from "../queues/jobs.js";
 import { whatsAppAdapter } from "../adapters/whatsapp.js";
 import { classifyLead } from "./leadClassifier.service.js";
 import { serializeMessage } from "./serializers.js";
-import { waitForWhatsAppReady, getWajsStatus } from "./whatsappWebjs.service.js";
+import { waitForWhatsAppReady, getWajsMetadataSnapshot } from "./whatsappWebjs.service.js";
 
 function isRetryableError(err: any): boolean {
   const msg = err.message || "";
@@ -35,15 +35,19 @@ export async function sendOutboundMessage(messageId: string, attemptsMade: numbe
   }
 
   // ── Connection Gating ──────────────────────────────────────────────────────
+  // IMPORTANT: this job runs in the worker process — the live WaJS client singleton
+  // lives in the API process. We MUST read status from Redis (via getWajsMetadataSnapshot)
+  // rather than the in-memory _status which is always BOOTING in this process.
   try {
-    const status = getWajsStatus();
+    const snapshot = await getWajsMetadataSnapshot();
+    const status = snapshot.status;
     if (status !== "CONNECTED" && status !== "SYNCING") {
       console.log(`[Outbound] WhatsApp status is ${status}. Waiting for readiness…`);
       message.status = "waiting_connection";
       await message.save();
       emitRealtime("message.status_updated", serializeMessage(message));
       
-      // Wait for up to 30 seconds
+      // Wait for up to 30 seconds (polls Redis via getWajsMetadataSnapshot)
       await waitForWhatsAppReady(30000);
     }
   } catch (err: any) {

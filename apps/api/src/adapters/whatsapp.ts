@@ -131,9 +131,16 @@ export class WaJsAdapter implements WhatsAppAdapter {
       console.warn(`[WaJsAdapter] Could not fetch state before send:`, err);
     }
     
-    // WhatsApp chat IDs strip the leading "+" and append @c.us if not explicitly provided
-    // [Step 3 & 5] If chatId is provided (e.g. from MongoDB lead.chatId which might be an @lid), use it directly!
-    const chatId = payload.chatId || `${payload.phone.replace(/^\+/, "")}@c.us`;
+    let chatId = payload.chatId;
+    if (!chatId) {
+      const numberStr = payload.phone.replace(/^\+/, "");
+      try {
+        const numberId = await client.getNumberId(numberStr);
+        chatId = numberId ? numberId._serialized : `${numberStr}@c.us`;
+      } catch (err) {
+        chatId = `${numberStr}@c.us`;
+      }
+    }
     console.log(`[WaJsAdapter] [Step 3] Sending to chatId: ${chatId} (type: ${typeof chatId})`);
     
     try {
