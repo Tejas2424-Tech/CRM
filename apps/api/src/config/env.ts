@@ -4,8 +4,13 @@ import { fileURLToPath } from "url";
 import { z } from "zod";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-dotenv.config({ path: path.resolve(__dirname, "../../../../.env") });
-dotenv.config();
+// override: true ensures the .env file always wins over stale shell-level variables.
+// This matters in dev when tsx watch restarts the child process and inherits
+// an old WA_CLIENT_MODE (or similar) from the parent shell.
+// In production the real system environment is loaded first anyway, and any
+// .env file present is still applied via the second call.
+dotenv.config({ path: path.resolve(__dirname, "../../../../.env"), override: true });
+dotenv.config({ override: true });
 
 const isProduction = process.env.NODE_ENV === "production";
 

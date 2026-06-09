@@ -8,21 +8,15 @@ export type InboundJob = {
   name?: string;
   text: string;
   timestamp?: string;
+  isNewLead?: boolean;
 };
 
 export type OutboundJob = {
   messageId: string;
 };
 
-export type CampaignRecipientJob = {
-  campaignId: string;
-  recipientId: string;
-};
-
 export type StatusJob = {
   messageId?: string;
-  recipientId?: string;
-  waMessageId: string;
   status: "sent" | "delivered" | "read";
 };
 
@@ -34,21 +28,47 @@ export type SyncJob = {
 const defaultOpts = { attempts: 5, backoff: { type: "exponential", delay: 2000 }, removeOnComplete: true, removeOnFail: false };
 
 export const inboundQueue = new Queue<InboundJob>("process-inbound-message", { connection: createRedisConnection(), defaultJobOptions: defaultOpts });
-export const outboundQueue = new Queue<OutboundJob>("send-outbound-message", { 
-  connection: createRedisConnection(),
-  defaultJobOptions: defaultOpts
-});
-export const campaignQueue = new Queue<CampaignRecipientJob>("send-campaign-recipient", { 
+export const outboundQueue = new Queue<OutboundJob>("send-outbound-message", {
   connection: createRedisConnection(),
   defaultJobOptions: defaultOpts
 });
 export const statusQueue = new Queue<StatusJob>("simulate-message-status", { connection: createRedisConnection(), defaultJobOptions: defaultOpts });
 export const automationQueue = new Queue<InboundJob>("run-automation", { connection: createRedisConnection(), defaultJobOptions: defaultOpts });
-export const syncQueue = new Queue<SyncJob>("whatsapp-sync", { connection: createRedisConnection(), defaultJobOptions: { ...defaultOpts, attempts: 1 } });
+export const syncQueue = new Queue<SyncJob>("whatsapp-sync", { connection: createRedisConnection(), defaultJobOptions: { ...defaultOpts, attempts: 3 } });
 
 export type LostLeadsJob = Record<string, never>;
 
 export const lostLeadsQueue = new Queue<LostLeadsJob>("recompute-lost-leads", {
   connection: createRedisConnection(),
   defaultJobOptions: { attempts: 1, removeOnComplete: true, removeOnFail: false }
+});
+
+export type FollowupStepJob = {
+  enrollmentId: string;
+  stepIndex: number; // -1 = welcome, 0 = step[0], 1 = step[1]
+};
+
+export const followupQueue = new Queue<FollowupStepJob>("followup-steps", {
+  connection: createRedisConnection(),
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: { type: "exponential", delay: 5000 },
+    removeOnComplete: true,
+    removeOnFail: false
+  }
+});
+
+export type CampaignRecipientJob = {
+  campaignId: string;
+  recipientId: string;
+};
+
+export const campaignQueue = new Queue<CampaignRecipientJob>("process-campaign-recipient", {
+  connection: createRedisConnection(),
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: { type: "exponential", delay: 5000 },
+    removeOnComplete: true,
+    removeOnFail: false
+  }
 });

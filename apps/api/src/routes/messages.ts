@@ -70,6 +70,28 @@ messagesRouter.post("/send", async (req, res) => {
   res.json({ success: true, message: serializeMessage(message) });
 });
 
+messagesRouter.post("/:id/retry", async (req, res) => {
+  const message = await Message.findById(req.params.id);
+  if (!message) return res.status(404).json({ error: "Message not found" });
+  if (message.direction !== "out" || message.status !== "failed") {
+    return res.status(400).json({ error: "Only failed outbound messages can be retried" });
+  }
+
+  message.status = "queued";
+  await message.save();
+
+  // Use a new jobId — the original outbound_${id} job may still be in the
+  // BullMQ failed set (removeOnFail: false), so we need a distinct ID.
+  await outboundQueue.add(
+    "agent-send",
+    { messageId: message._id.toString() },
+    { jobId: `outbound_${message._id.toString()}_r${Date.now()}` }
+  );
+
+  emitRealtime("message:status", serializeMessage(message));
+  res.json({ success: true, message: serializeMessage(message) });
+});
+
 messagesRouter.post("/send-direct", async (req, res) => {
   console.log("[Outbound] [Step 4] Direct Manual Send triggered. Payload:", req.body);
   const { chatId, text } = req.body;

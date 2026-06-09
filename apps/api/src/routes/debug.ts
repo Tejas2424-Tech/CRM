@@ -1,7 +1,11 @@
 import { Router } from "express";
+import { requireAuth, requireRole } from "../auth/auth.js";
 import { getWajsClient } from "../services/whatsappWebjs.service.js";
 
 export const debugRouter = Router();
+
+debugRouter.use(requireAuth);
+debugRouter.use(requireRole("admin"));
 
 debugRouter.get("/dump", async (req, res) => {
   try {

@@ -5,7 +5,10 @@ import { Message } from "../models/Message.js";
 import { ProcessedEvent } from "../models/ProcessedEvent.js";
 import { automationQueue } from "../queues/jobs.js";
 import { isOptOutMessage } from "./compliance.js";
+import { stopEnrollment } from "./followup.js";
+import { updateRecipientStatus } from "./campaigns.js";
 import { classifyLead } from "./leadClassifier.service.js";
+import { reconcileLidSibling } from "./leadMerge.service.js";
 import { serializeLead, serializeMessage } from "./serializers.js";
 
 const debugMessageSync = process.env.MESSAGE_SYNC_DEBUG === "1";
@@ -55,6 +58,8 @@ export async function processInboundMessage(job: {
       { new: true, upsert: true }
     );
 
+    const isNewLead = (Date.now() - lead.createdAt.getTime()) < 10_000;
+
     let message;
     try {
       const result = await Message.updateOne(
@@ -91,15 +96,33 @@ export async function processInboundMessage(job: {
       { upsert: true }
     );
 
-    lead.unreadCount = (lead.unreadCount ?? 0) + 1;
-    await lead.save();
+    await Lead.updateOne({ _id: lead._id }, { $inc: { unreadCount: 1 } });
+    lead.unreadCount = (lead.unreadCount ?? 0) + 1; // keep local copy in sync for serializeLead
 
     emitRealtime("lead:update", serializeLead(lead));
     emitRealtime("message:new", serializeMessage(message));
     classifyLead(lead._id.toString(), { type: "inbound_message", text: job.text }).catch(console.warn);
 
+    // Human handoff: cancel all pending follow-up jobs instantly on any reply.
+    // Fire-and-forget — never blocks inbound processing.
+    stopEnrollment(lead._id.toString(), "system", "reply").catch((err) =>
+      console.warn("[Inbound] stopEnrollment failed:", err)
+    );
+
+    // Campaign reply tracking: mark recipient as replied in any running campaign.
+    // Fire-and-forget — never blocks inbound processing.
+    updateRecipientStatus(lead._id.toString(), "replied").catch((err) =>
+      console.warn("[Inbound] campaign updateRecipientStatus failed:", err)
+    );
+
+    // If this is a real-phone lead and the inbound came from an @lid chat, check for a
+    // matching lid: sibling lead and merge them. Fire-and-forget — never blocks inbound.
+    if (!lead.phone.startsWith("lid:") && job.chatId?.endsWith("@lid")) {
+      reconcileLidSibling(lead._id.toString(), job.chatId).catch(console.warn);
+    }
+
     if (!optedOut) {
-      await automationQueue.add("welcome-followup", job, { delay: 1000 });
+      await automationQueue.add("welcome-followup", { ...job, isNewLead }, { delay: 1000 });
     }
 
     await ProcessedEvent.updateOne({ key: job.waMessageId }, { $set: { status: "completed" } });

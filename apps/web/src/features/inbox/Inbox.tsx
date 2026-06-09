@@ -1,11 +1,159 @@
 import type { AgentDTO, LeadDTO, LeadStatus, MessageDTO, NoteDTO, TaskDTO } from "@crm/shared";
 import { Check, Search, Send } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import { Empty, LeadAvatar, LeadNameBlock, MessageBubble, SectionTitle, agentName, formatPhone, stageLabels, windowText } from "../../components";
 import { mergeUniqueMessages, messageRenderKey, stages, uniqueById } from "../../utils";
 
 import { useCrm } from "../../context/CrmContext";
+
+// ─── EnrollmentPanel ─────────────────────────────────────────────────────────
+
+function EnrollmentPanel({ leadId }: { leadId: string }) {
+  const { followupPlans, auth } = useCrm();
+  const { plans, enrollmentCache, loadEnrollmentForLead, enrollLead, stopLeadEnrollment } =
+    followupPlans;
+
+  const [isEnrolling, setIsEnrolling] = useState(false);
+  const [isStopping, setIsStopping] = useState(false);
+  const [selectedPlanId, setSelectedPlanId] = useState("");
+
+  const enrollment = enrollmentCache.get(leadId);
+
+  useEffect(() => {
+    if (!enrollmentCache.has(leadId)) {
+      loadEnrollmentForLead(leadId);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [leadId]);
+
+  if (enrollment === undefined) {
+    return <p style={{ color: "#697567", fontSize: 13 }}>Loading…</p>;
+  }
+
+  const handleEnroll = async () => {
+    if (!selectedPlanId) return;
+    setIsEnrolling(true);
+    try {
+      await enrollLead(leadId, selectedPlanId);
+      setSelectedPlanId("");
+    } finally {
+      setIsEnrolling(false);
+    }
+  };
+
+  const handleStop = async () => {
+    if (!window.confirm("Stop all pending follow-up messages for this lead?")) return;
+    setIsStopping(true);
+    try {
+      await stopLeadEnrollment(leadId);
+    } finally {
+      setIsStopping(false);
+    }
+  };
+
+  if (enrollment && enrollment.status === "active") {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between"
+          }}
+        >
+          <span
+            style={{
+              fontSize: 12,
+              background: "#dcfce7",
+              color: "#166534",
+              borderRadius: 4,
+              padding: "2px 8px",
+              fontWeight: 600
+            }}
+          >
+            Active
+          </span>
+          {auth.canManage && (
+            <button
+              className="secondary-button"
+              style={{ fontSize: 11, padding: "2px 8px", color: "#ef4444" }}
+              disabled={isStopping}
+              onClick={handleStop}
+            >
+              {isStopping ? "Stopping…" : "Stop"}
+            </button>
+          )}
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+          {enrollment.steps.map((step) => (
+            <div
+              key={step.stepIndex}
+              style={{
+                fontSize: 12,
+                display: "flex",
+                justifyContent: "space-between",
+                padding: "3px 6px",
+                borderRadius: 4,
+                background:
+                  step.status === "sent"
+                    ? "#f0fdf4"
+                    : step.status === "skipped"
+                    ? "#f9fafb"
+                    : "#fffbeb"
+              }}
+            >
+              <span style={{ fontWeight: step.status === "pending" ? 600 : 400 }}>
+                {step.label === "welcome" ? "Welcome" : `Follow-up #${step.stepIndex + 1}`}
+              </span>
+              <span style={{ color: "#697567" }}>
+                {step.status === "sent"
+                  ? `Sent ${new Date(step.sentAt!).toLocaleDateString()}`
+                  : step.status === "pending"
+                  ? `Due ${new Date(step.scheduledAt).toLocaleString()}`
+                  : "Skipped"}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  if (!auth.canManage) {
+    return <p style={{ color: "#697567", fontSize: 13, margin: 0 }}>No active follow-up plan.</p>;
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <p style={{ color: "#697567", fontSize: 13, margin: 0 }}>No active follow-up plan.</p>
+      {plans.length > 0 && (
+        <>
+          <select
+            className="input"
+            value={selectedPlanId}
+            onChange={(e) => setSelectedPlanId(e.target.value)}
+          >
+            <option value="">Select a plan…</option>
+            {plans.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+                {p.isDefault ? " (default)" : ""}
+              </option>
+            ))}
+          </select>
+          <button
+            className="secondary-button"
+            disabled={!selectedPlanId || isEnrolling}
+            onClick={handleEnroll}
+          >
+            {isEnrolling ? "Enrolling…" : "Start Follow-up Plan"}
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
 
 const emailPattern = /^(?!\.)(?!.*\.\.)([A-Za-z0-9_'+\-.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9-]*\.)+[A-Za-z]{2,}$/;
 
@@ -14,6 +162,7 @@ export function Inbox() {
   const selectedLead = leads.leads.find(l => l.id === leads.selectedLeadId);
   const [draftLead, setDraftLead] = useState({ name: "", email: "", tags: "" });
   const [emailError, setEmailError] = useState<string>();
+  const messagesRef = useRef<HTMLDivElement>(null);
   
   const props = {
     waStatus: whatsapp.waUiStatus,
@@ -39,6 +188,12 @@ export function Inbox() {
     createTask: () => tasks.createTask(leads.selectedLeadId, selectedLead?.assignedTo),
   };
   const lead = props.selectedLead;
+
+  useLayoutEffect(() => {
+    if (messagesRef.current) {
+      messagesRef.current.scrollTop = messagesRef.current.scrollHeight;
+    }
+  }, [leads.selectedLeadId, inbox.messages.length]);
 
   useEffect(() => {
     setDraftLead({
@@ -138,13 +293,13 @@ export function Inbox() {
               </select>
             </header>
 
-            <div className="messages">
+            <div className="messages" ref={messagesRef}>
               {(() => {
                 // Final defensive dedup in render — ensures React never sees duplicate keys
                 // even during transient state between optimistic update and server confirmation
                 const deduped = mergeUniqueMessages([], props.messages);
                 return deduped.length
-                  ? deduped.map((msg, index) => <MessageBubble key={messageRenderKey(msg, index)} message={msg} />)
+                  ? deduped.map((msg, index) => <MessageBubble key={messageRenderKey(msg, index)} message={msg} onRetry={inbox.retryMessage} />)
                   : <Empty text="No messages in this conversation yet." />;
               })()}
             </div>
@@ -207,7 +362,10 @@ export function Inbox() {
               {uniqueById(props.notes).map((note) => <p key={note.id}>{note.body}<small>{new Date(note.createdAt).toLocaleString()}</small></p>)}
             </div>
 
-            <SectionTitle title="Follow-up" />
+            <SectionTitle title="Follow-up Plan" />
+            <EnrollmentPanel leadId={lead.id} />
+
+            <SectionTitle title="Reminders" />
             <input className="input" placeholder="Task title" value={props.taskForm.title} onChange={(e) => props.setTaskForm({ ...props.taskForm, title: e.target.value })} />
             <input className="input" type="datetime-local" value={props.taskForm.dueAt} onChange={(e) => props.setTaskForm({ ...props.taskForm, dueAt: e.target.value })} />
             <button className="secondary-button" onClick={props.createTask}>Set reminder</button>

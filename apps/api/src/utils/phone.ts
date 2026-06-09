@@ -8,6 +8,10 @@ export function normalizePhone(raw: string): string {
   // These are privacy-preserving identifiers, not real phone numbers.
   if (raw.startsWith("lid:")) return raw;
 
+  // @lid format ("12345678901@lid") is WhatsApp's privacy-preserving chat ID.
+  // The numeric portion is NOT a real phone number — treat as non-normalizable.
+  if (raw.endsWith("@lid")) return "";
+
   // 1. Remove all non-numeric characters (including whitespace, dashes, pluses)
   const digitsOnly = raw.replace(/\D/g, "");
   

@@ -26,10 +26,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { env } from "../config/env.js";
 import { emitRealtime } from "../config/realtime.js";
+import { Conversation } from "../models/Conversation.js";
+import { Lead } from "../models/Lead.js";
+import { Message } from "../models/Message.js";
 import { redisConnection } from "../queues/connection.js";
 import { inboundQueue } from "../queues/jobs.js";
 import { audit } from "./audit.js";
 import { syncAllChats } from "./chatSync.service.js";
+import { serializeMessage } from "./serializers.js";
+import { normalizePhone } from "../utils/phone.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WA_STATUS_KEY = `wajs:${env.WA_CLIENT_ID}:status`;
@@ -78,8 +83,6 @@ let _ownerLockRefresh: NodeJS.Timeout | null = null;
 let _heartbeatInterval: NodeJS.Timeout | null = null;
 let _initRetryTimer: NodeJS.Timeout | null = null;
 let _initWatchdog: NodeJS.Timeout | null = null;
-
-import { normalizePhone } from "../utils/phone.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -646,7 +649,9 @@ async function initialiseOwnedClient(): Promise<void> {
         if (msg.from === "status@broadcast") return;
       }
 
-      let phone = normalizePhone(msg.from as string);
+      const rawFrom = msg.from as string;
+      // normalizePhone returns "" for @lid format (not a real phone number).
+      let phone = normalizePhone(rawFrom);
       const text: string = msg.body ?? "";
       const waMessageId: string = msg.id?._serialized ?? msg.id?.id ?? crypto.randomUUID();
 
@@ -655,9 +660,9 @@ async function initialiseOwnedClient(): Promise<void> {
       try {
         const contact = await msg.getContact();
         name = contact?.pushname || contact?.name || undefined;
-        
-        // If WhatsApp hid the number behind an @lid, the Contact object might still have the real number!
-        if (contact?.number) {
+
+        // If WhatsApp hid the number behind an @lid, the Contact object might still have the real number.
+        if (contact?.number && !contact.number.endsWith("@lid") && !contact.number.endsWith("@c.us")) {
           phone = normalizePhone(contact.number);
         }
       } catch (err: any) {
@@ -674,6 +679,19 @@ async function initialiseOwnedClient(): Promise<void> {
           console.warn(`[WaJS] getContact failed for ${waMessageId}:`, err);
         }
         // Non-critical — continue without name
+      }
+
+      // @lid fallback: phone is still empty because getContact() failed or returned no number.
+      // Use the same lid: key format that chatSync uses so the message lands on the correct Lead
+      // instead of creating a garbage-phone Lead from the LID numeric digits.
+      if (!phone && rawFrom.endsWith("@lid")) {
+        phone = `lid:${rawFrom.split("@")[0]}`;
+      }
+
+      // If phone is still empty, we cannot safely create or update a Lead.
+      if (!phone) {
+        console.warn(`[WaJS] Cannot resolve phone for ${rawFrom} — message skipped`);
+        return;
       }
 
       console.log(`[WaJS] ← inbound ${phone}: ${text.slice(0, 80)}`);
@@ -701,6 +719,75 @@ async function initialiseOwnedClient(): Promise<void> {
       console.log(`[WaJS] ✓ queued inbound job for ${phone} (msg: ${waMessageId})`);
     } catch (err) {
       console.error("[WaJS] Failed to process incoming message:", err);
+    }
+  });
+
+  // ── Phone-sent outbound messages ─────────────────────────────────────────
+  // message_create fires for ALL messages (sent + received). We only want
+  // fromMe=true here to capture messages typed on the physical handset.
+  // CRM-initiated sends are excluded via a Redis dedup key set by outbound.ts.
+  _client.on("message_create", async (msg: any) => {
+    try {
+      if (!msg.fromMe) return;
+      if (msg.isGroupMsg) return;
+      const rawTo = msg.to as string | undefined;
+      if (!rawTo || rawTo.endsWith("@g.us") || rawTo === "status@broadcast") return;
+
+      const waMessageId: string = msg.id?._serialized ?? msg.id?.id;
+      if (!waMessageId) return;
+
+      // Primary dedup: CRM-sent messages are marked in Redis by outbound.ts
+      try {
+        const isCrmSent = await redisConnection.get(`crm:sent:wamid:${waMessageId}`);
+        if (isCrmSent) return;
+      } catch { /* Redis unavailable — fall through to DB dedup */ }
+
+      // Find lead early — needed for in-flight check below
+      const phone = normalizePhone(rawTo);
+      const lead = await Lead.findOne({
+        $or: [{ chatId: rawTo }, ...(phone ? [{ phone }] : [])]
+      });
+      if (!lead) return;
+
+      // Race-condition guard: outbound.ts sets the Redis key AFTER sendTextMessage
+      // returns, but message_create fires DURING sendTextMessage. If the CRM has
+      // any in-flight outbound message for this lead, skip — outbound.ts owns it.
+      const inflightCrm = await Message.exists({
+        leadId: lead._id,
+        direction: "out",
+        status: { $in: ["queued", "waiting_connection", "retrying"] }
+      });
+      if (inflightCrm) return;
+
+      // Secondary dedup: DB check for waMessageId
+      const duplicate = await Message.findOne({ waMessageId });
+      if (duplicate) return;
+
+      const text: string = msg.body ?? "";
+      const timestamp = msg.timestamp ? new Date((msg.timestamp as number) * 1000) : new Date();
+
+      const message = await Message.create({
+        leadId: lead._id,
+        direction: "out",
+        type: "text",
+        content: text,
+        fromMe: true,
+        waMessageId,
+        status: "sent",
+        timestamp,
+      });
+
+      await Conversation.updateOne(
+        { leadId: lead._id },
+        { $set: { lastMessage: text } },
+        { upsert: true }
+      );
+      await Lead.updateOne({ _id: lead._id }, { $set: { lastActivity: timestamp } });
+
+      emitRealtime("message:new", serializeMessage(message));
+      console.log(`[WaJS] ← phone-sent to ${lead.phone}: ${text.slice(0, 80)}`);
+    } catch (err) {
+      console.error("[WaJS] message_create handler error:", err);
     }
   });
 

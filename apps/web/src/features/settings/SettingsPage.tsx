@@ -11,15 +11,16 @@ export function SettingsPage() {
   const isLoading = waLogoutLoading || waStatus === "INITIALISING" || waStatus === "AUTHENTICATING" || isSyncing;
 
   const statusColor = isConnected ? "#25d366" : isQrPending ? "#f59e0b" : isSyncing ? "#3b82f6" : "#ef4444";
-  const statusLabel = ({ 
-    CONNECTED: "Connected", 
-    QR_REQUIRED: "Waiting for QR scan", 
-    AUTHENTICATING: "Authenticating…", 
+  const statusLabel = ({
+    CONNECTED: "Connected",
+    QR_REQUIRED: "Waiting for QR scan",
+    AUTHENTICATING: "Authenticating…",
     HYDRATING: "Hydrating Data…",
-    SYNCING: "Syncing Chats…", 
-    DISCONNECTED: "Disconnected", 
+    SYNCING: "Syncing Chats…",
+    DISCONNECTED: "Disconnected",
     INITIALISING: "Initialising…",
-    FAILED: "Failed"
+    FAILED: "Failed",
+    NOT_APPLICABLE: "Not configured"
   } as Record<string, string>)[waStatus] ?? waStatus;
 
   return (
@@ -48,6 +49,12 @@ export function SettingsPage() {
               <><span style={{ width: 14, height: 14, border: "2px solid #fff", borderTop: "2px solid transparent", borderRadius: "50%", animation: "spin 0.8s linear infinite", display: "inline-block" }} />{waLogoutLoading ? "Logging out…" : statusLabel}</>
             ) : <>Logout WhatsApp</>}
           </button>
+        )}
+
+        {waStatus === "NOT_APPLICABLE" && (
+          <p style={{ color: "#9ca3af", fontSize: 13, marginTop: 8 }}>
+            WhatsApp Web mode is not active. Set <code>WA_CLIENT_MODE=webjs</code> in your <code>.env</code> file and restart the server.
+          </p>
         )}
 
         {waStatus === "DISCONNECTED" && !waLogoutLoading && (

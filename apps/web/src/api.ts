@@ -1,5 +1,5 @@
 
-import type { AgentDTO, AuthUser, CampaignDTO, LeadDTO, MessageDTO, NoteDTO, TaskDTO, TemplateDTO } from "@crm/shared";
+import type { AgentDTO, AuthUser, CampaignDTO, CampaignRecipientDTO, CsvPreviewResponse, FollowupEnrollmentDTO, FollowupPlanDTO, LeadDTO, MessageDTO, NoteDTO, TaskDTO } from "@crm/shared";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:4000";
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
@@ -44,7 +44,8 @@ async function requestJson<T>(path: string, token?: string, init?: RequestInit, 
 
   const headers: Record<string, string> = {
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    ...(init?.body ? { "Content-Type": "application/json" } : {}),
+    // Only set JSON content-type for non-FormData bodies (FormData sets its own boundary header)
+    ...(init?.body && !(init.body instanceof FormData) ? { "Content-Type": "application/json" } : {}),
     ...(init?.headers as Record<string, string> | undefined)
   };
 
@@ -90,7 +91,9 @@ export const api = {
   login: (email: string) =>
     requestJson<Session>("/auth/dev-login", undefined, { method: "POST", body: JSON.stringify({ email }) }, { timeoutMs: AUTH_REQUEST_TIMEOUT_MS }),
   leads: (token: string, filters: Record<string, string>) => {
-    const params = new URLSearchParams(Object.entries(filters).filter(([, value]) => value));
+    const translated: Record<string, string> = { ...filters };
+    if (translated.status) { translated.stage = translated.status; delete translated.status; }
+    const params = new URLSearchParams(Object.entries(translated).filter(([, value]) => value));
     return requestJson<LeadDTO[]>(`/api/leads?${params}`, token);
   },
   createLead: (token: string, body: Pick<LeadDTO, "phone"> & Partial<LeadDTO>) =>
@@ -100,6 +103,8 @@ export const api = {
   messages: (token: string, leadId: string) => requestJson<MessageDTO[]>(`/api/messages/${leadId}`, token),
   sendMessage: (token: string, leadId: string, text: string) =>
     requestJson<{ success: boolean; message: MessageDTO }>("/api/messages/send", token, { method: "POST", body: JSON.stringify({ leadId, text }) }),
+  retryMessage: (token: string, messageId: string) =>
+    requestJson<{ success: boolean; message: MessageDTO }>(`/api/messages/${messageId}/retry`, token, { method: "POST" }),
   notes: (token: string, leadId: string) => requestJson<NoteDTO[]>(`/api/leads/${leadId}/notes`, token),
   createNote: (token: string, leadId: string, body: string) =>
     requestJson<NoteDTO>(`/api/leads/${leadId}/notes`, token, { method: "POST", body: JSON.stringify({ body }) }),
@@ -109,7 +114,6 @@ export const api = {
     requestJson<TaskDTO>(`/api/leads/${leadId}/tasks`, token, { method: "POST", body: JSON.stringify(body) }),
   updateTask: (token: string, id: string, body: Partial<TaskDTO>) =>
     requestJson<TaskDTO>(`/api/tasks/${id}`, token, { method: "PATCH", body: JSON.stringify(body) }),
-  templates: (token: string) => requestJson<TemplateDTO[]>("/api/templates", token),
   users: (token: string) => requestJson<AgentDTO[]>("/api/users", token),
   createUser: (token: string, body: { name: string; email: string; role: AgentDTO["role"]; capacity: number }) =>
     requestJson<AgentDTO>("/api/users", token, { method: "POST", body: JSON.stringify(body) }),
@@ -117,16 +121,11 @@ export const api = {
     requestJson<AgentDTO>(`/api/users/${id}`, token, { method: "PATCH", body: JSON.stringify(body) }),
   deleteUser: (token: string, id: string) =>
     requestJson<{ success: boolean }>(`/api/users/${id}`, token, { method: "DELETE" }),
-  campaigns: (token: string) => requestJson<CampaignDTO[]>("/api/campaigns", token),
-  createCampaign: (token: string, body: { name: string; templateId: string; audienceQuery: Record<string, string>; scheduledAt?: string }) =>
-    requestJson<CampaignDTO>("/api/campaigns", token, { method: "POST", body: JSON.stringify(body) }),
-  campaignStats: (token: string, id: string) => requestJson<Record<string, number>>(`/api/campaigns/${id}/stats`, token),
   analytics: (token: string) => requestJson<{
     leadCount: number;
     optedInLeads: number;
     inboundMessages: number;
     outboundMessages: number;
-    delivery: Record<string, number>;
   }>("/api/analytics/summary", token),
   /** Phase 1: Trigger a full WhatsApp contact + chat sync (202 fire-and-forget) */
   triggerSync: (token: string) =>
@@ -152,5 +151,82 @@ export const api = {
    * Admin only. Returns 202; progress arrives via Socket.IO crm:reset events.
    */
   resetCrm: (token: string) =>
-    requestJson<{ message: string }>("/api/admin/reset-crm", token, { method: "POST" })
+    requestJson<{ message: string }>("/api/admin/reset-crm", token, { method: "POST" }),
+
+  // ─── Follow-up Plans ────────────────────────────────────────────────────────
+  followupPlans: (token: string) =>
+    requestJson<FollowupPlanDTO[]>("/api/followup-plans", token),
+
+  createFollowupPlan: (
+    token: string,
+    body: Omit<FollowupPlanDTO, "id" | "createdBy" | "createdAt" | "updatedAt">
+  ) =>
+    requestJson<FollowupPlanDTO>("/api/followup-plans", token, {
+      method: "POST",
+      body: JSON.stringify(body)
+    }),
+
+  updateFollowupPlan: (token: string, id: string, body: Partial<FollowupPlanDTO>) =>
+    requestJson<FollowupPlanDTO>(`/api/followup-plans/${id}`, token, {
+      method: "PATCH",
+      body: JSON.stringify(body)
+    }),
+
+  deleteFollowupPlan: (token: string, id: string) =>
+    requestJson<{ success: boolean }>(`/api/followup-plans/${id}`, token, { method: "DELETE" }),
+
+  // ─── Enrollments ────────────────────────────────────────────────────────────
+  getEnrollmentForLead: (token: string, leadId: string) =>
+    requestJson<FollowupEnrollmentDTO | null>(
+      `/api/followup-plans/enrollments/lead/${leadId}`,
+      token
+    ),
+
+  enrollLead: (token: string, leadId: string, planId: string) =>
+    requestJson<FollowupEnrollmentDTO>("/api/followup-plans/enrollments", token, {
+      method: "POST",
+      body: JSON.stringify({ leadId, planId })
+    }),
+
+  stopLeadEnrollment: (token: string, leadId: string) =>
+    requestJson<{ success: boolean }>(
+      `/api/followup-plans/enrollments/lead/${leadId}/stop`,
+      token,
+      { method: "POST" }
+    ),
+
+  // ─── Campaigns ──────────────────────────────────────────────────────────────
+  campaigns: (token: string, params?: Record<string, string>) => {
+    const qs = params ? `?${new URLSearchParams(Object.entries(params).filter(([, v]) => !!v))}` : "";
+    return requestJson<CampaignDTO[]>(`/api/campaigns${qs}`, token);
+  },
+  getCampaign: (token: string, id: string) =>
+    requestJson<CampaignDTO>(`/api/campaigns/${id}`, token),
+  createCampaign: (token: string, body: object) =>
+    requestJson<CampaignDTO>("/api/campaigns", token, { method: "POST", body: JSON.stringify(body) }),
+  updateCampaign: (token: string, id: string, body: Partial<CampaignDTO>) =>
+    requestJson<CampaignDTO>(`/api/campaigns/${id}`, token, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteCampaign: (token: string, id: string) =>
+    requestJson<{ success: boolean }>(`/api/campaigns/${id}`, token, { method: "DELETE" }),
+  launchCampaign: (token: string, id: string) =>
+    requestJson<CampaignDTO>(`/api/campaigns/${id}/launch`, token, { method: "POST" }),
+  pauseCampaign: (token: string, id: string) =>
+    requestJson<CampaignDTO>(`/api/campaigns/${id}/pause`, token, { method: "POST" }),
+  cancelCampaign: (token: string, id: string) =>
+    requestJson<CampaignDTO>(`/api/campaigns/${id}/cancel`, token, { method: "POST" }),
+  campaignRecipients: (token: string, id: string, params?: Record<string, string>) => {
+    const qs = params ? `?${new URLSearchParams(params)}` : "";
+    return requestJson<{ recipients: CampaignRecipientDTO[]; total: number }>(
+      `/api/campaigns/${id}/recipients${qs}`,
+      token
+    );
+  },
+  csvPreview: (token: string, file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return requestJson<CsvPreviewResponse>("/api/campaigns/csv-preview", token, {
+      method: "POST",
+      body: form
+    });
+  },
 };

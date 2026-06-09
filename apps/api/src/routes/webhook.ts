@@ -3,6 +3,7 @@ import { z } from "zod";
 import { whatsAppAdapter } from "../adapters/whatsapp.js";
 import { inboundQueue } from "../queues/jobs.js";
 import { env } from "../config/env.js";
+import { normalizePhone } from "../utils/phone.js";
 
 export const webhookRouter = Router();
 
@@ -37,13 +38,11 @@ webhookRouter.post("/", async (req, res) => {
     await Promise.all(
       messages.map((msg) =>
         inboundQueue
-          .add("meta-inbound", {
-            waMessageId: msg.waMessageId,
-            phone: msg.phone,
-            name: msg.name,
-            text: msg.text,
-            timestamp: msg.timestamp
-          })
+          .add(
+            "meta-inbound",
+            { waMessageId: msg.waMessageId, phone: msg.phone, name: msg.name, text: msg.text, timestamp: msg.timestamp },
+            { jobId: msg.waMessageId }
+          )
           .then(() => {
             if (process.env.MESSAGE_SYNC_DEBUG === "1") {
               console.log(`[MessageSync][Webhook] queued source=meta waMessageId=${msg.waMessageId} phone=${msg.phone}`);
@@ -75,7 +74,11 @@ webhookRouter.post("/whatsapp", async (req, res) => {
     return res.status(400).json({ error: "Invalid payload", details: parsed.error.issues });
   }
 
-  const { waMessageId, phone, name, text, timestamp } = parsed.data;
+  const { waMessageId, phone: rawPhone, name, text, timestamp } = parsed.data;
+  const phone = normalizePhone(rawPhone);
+  if (!phone) {
+    return res.status(400).json({ error: "Invalid phone number — could not normalize" });
+  }
   console.log(`[Webhook] Mock inbound: ${phone} → "${text.slice(0, 60)}"`);
 
   await inboundQueue.add("mock-inbound", { waMessageId, phone, name, text, timestamp });

@@ -55,11 +55,10 @@ export function useSocket(
 
     for (const eventName of eventNames) {
       const listener = (payload: any) => {
-        // Find the latest handler for this event
-        const evt = eventsRef.current.find(e => e.event === eventName);
-        if (evt && evt.handler) {
-          evt.handler(payload);
-        }
+        // Dispatch to ALL handlers registered for this event — multiple hooks
+        // (e.g. useWhatsApp + CrmContext) may each handle the same event name.
+        const evts = eventsRef.current.filter(e => e.event === eventName);
+        for (const evt of evts) evt.handler(payload);
       };
       boundListeners[eventName] = listener;
       if (debugSockets) console.debug(`[Socket] listen ${eventName}`);

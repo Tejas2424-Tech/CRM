@@ -10,7 +10,6 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { createApp } from "../app.js";
 import { env } from "../config/env.js";
 import { User } from "../models/User.js";
-import { CampaignRecipient } from "../models/Campaign.js";
 import { Lead } from "../models/Lead.js";
 import { Message } from "../models/Message.js";
 import { Task } from "../models/Task.js";
@@ -23,7 +22,6 @@ import { seedDefaults } from "../seed.js";
 vi.mock("../queues/jobs.js", () => ({
   inboundQueue: { add: vi.fn() },
   outboundQueue: { add: vi.fn() },
-  campaignQueue: { add: vi.fn() },
   statusQueue: { add: vi.fn() },
   automationQueue: { add: vi.fn() }
 }));
@@ -159,18 +157,6 @@ describe("Messaging CRM API", () => {
     expect(await Message.countDocuments({ leadId: lead._id })).toBe(125);
   });
 
-  it("creates campaign recipients only for opted-in audience members", async () => {
-    await Lead.create({ phone: "1", stage: "new", tags: ["vip"], consent: { optedIn: true }, lastActivity: new Date() });
-    await Lead.create({ phone: "2", stage: "new", tags: ["vip"], consent: { optedIn: false }, lastActivity: new Date() });
-    const template = await Template.findOne({ name: "welcome_offer" });
-    const res = await request(app)
-      .post("/api/campaigns")
-      .set("Authorization", `Bearer ${token("manager")}`)
-      .send({ name: "VIP offer", templateId: template!._id.toString(), audienceQuery: { tag: "vip" } });
-    expect(res.status).toBe(201);
-    expect(await CampaignRecipient.countDocuments()).toBe(1);
-  });
-
   it("records opt out keywords and blocks future template sends", async () => {
     await processInboundMessage({ waMessageId: "wa-stop", phone: "15551234567", text: "STOP" });
     const lead = await Lead.findOne({ phone: "15551234567" });
@@ -181,15 +167,6 @@ describe("Messaging CRM API", () => {
       .set("Authorization", `Bearer ${token("manager")}`)
       .send({ leadId: lead!._id.toString(), templateId: template!._id.toString() });
     expect(res.status).toBe(400);
-  });
-
-  it("blocks agents from creating campaigns", async () => {
-    const template = await Template.findOne({ name: "welcome_offer" });
-    const res = await request(app)
-      .post("/api/campaigns")
-      .set("Authorization", `Bearer ${token("agent")}`)
-      .send({ name: "Nope", templateId: template!._id.toString(), audienceQuery: {} });
-    expect(res.status).toBe(403);
   });
 
   it("returns seeded dev users", async () => {

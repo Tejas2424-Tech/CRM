@@ -6,11 +6,12 @@ import {
   KanbanSquare,
   LayoutDashboard,
   ListChecks,
+  Megaphone,
   MessageSquare,
   RefreshCw,
+  Repeat,
   Settings,
   ShieldCheck,
-  Tags,
   Users,
   Wifi,
 } from "lucide-react";
@@ -22,11 +23,12 @@ import { Inbox } from "./features/inbox/Inbox";
 import { Pipeline } from "./features/pipeline/Pipeline";
 import { LeadsPage } from "./features/leads/LeadsPage";
 import { TasksPage } from "./features/tasks/TasksPage";
-import { TemplatesPage } from "./features/templates/TemplatesPage";
+import { FollowupPlansPage } from "./features/followup/FollowupPlansPage";
 import { AnalyticsPage } from "./features/analytics/AnalyticsPage";
 import { TeamPage } from "./features/team/TeamPage";
 import { SettingsPage } from "./features/settings/SettingsPage";
 import { ProfilePage } from "./features/profile/ProfilePage";
+import { BulkCampaignsPage } from "./features/campaigns/BulkCampaignsPage";
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -36,8 +38,9 @@ type View =
   | "pipeline"
   | "leads"
   | "tasks"
-  | "templates"
+  | "followup-plans"
   | "analytics"
+  | "campaigns"
   | "team"
   | "settings"
   | "profile";
@@ -48,8 +51,9 @@ const navItems: Array<{ view: View; label: string; icon: React.ReactNode; manage
   { view: "pipeline", label: "Pipeline", icon: <KanbanSquare size={18} /> },
   { view: "leads", label: "Leads", icon: <Users size={18} /> },
   { view: "tasks", label: "Tasks", icon: <ListChecks size={18} /> },
-  { view: "templates", label: "Templates", icon: <Tags size={18} />, manager: true },
+  { view: "followup-plans", label: "Follow-up Plans", icon: <Repeat size={18} />, manager: true },
   { view: "analytics", label: "Analytics", icon: <BarChart3 size={18} />, manager: true },
+  { view: "campaigns", label: "Campaigns", icon: <Megaphone size={18} />, manager: true },
   { view: "team", label: "Team", icon: <ShieldCheck size={18} />, manager: true },
   { view: "settings", label: "Settings", icon: <Settings size={18} />, admin: true },
   { view: "profile", label: "Profile", icon: <CircleUserRound size={18} /> },
@@ -63,8 +67,9 @@ function titleFor(view: View) {
       pipeline: "Pipeline",
       leads: "Contacts",
       tasks: "Follow-ups",
-      templates: "Templates",
+      "followup-plans": "Follow-up Plans",
       analytics: "Analytics",
+      campaigns: "Bulk Campaigns",
       team: "Team",
       settings: "Settings",
       profile: "Profile",
@@ -80,8 +85,9 @@ function subtitleFor(view: View) {
       pipeline: "Move leads through the sales flow",
       leads: "Search, create, and export leads",
       tasks: "Never miss a follow-up",
-      templates: "Approved WhatsApp message templates",
+      "followup-plans": "Automate outreach sequences for new leads",
       analytics: "Team performance and conversion signals",
+      campaigns: "Send targeted messages to contact segments",
       team: "Users, roles, capacity, and assignments",
       settings: "Business, WhatsApp, rules, and security",
       profile: "Your account and workload",
@@ -207,8 +213,9 @@ export function App() {
         {view === "pipeline" && <Pipeline openLead={(id) => { crm.leads.setSelectedLeadId(id); setView("inbox"); }} />}
         {view === "leads" && <LeadsPage openLead={(id) => { crm.leads.setSelectedLeadId(id); setView("inbox"); }} />}
         {view === "tasks" && <TasksPage openLead={(id) => { crm.leads.setSelectedLeadId(id); setView("inbox"); }} />}
-        {view === "templates" && <TemplatesPage />}
+        {view === "followup-plans" && <FollowupPlansPage />}
         {view === "analytics" && <AnalyticsPage />}
+        {view === "campaigns" && <BulkCampaignsPage />}
         {view === "team" && <TeamPage />}
         {view === "settings" && <SettingsPage />}
         {view === "profile" && <ProfilePage />}

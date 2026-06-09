@@ -24,6 +24,7 @@ import { Lead } from "../models/Lead.js";
 import { Message } from "../models/Message.js";
 import { serializeLead, serializeMessage } from "./serializers.js";
 import { redisConnection } from "../queues/connection.js";
+import { reconcileLidSibling } from "./leadMerge.service.js";
 import { normalizePhone } from "../utils/phone.js";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
@@ -142,17 +143,31 @@ export async function syncContact(
   const displayName = resolveDisplayName(savedName, pushName, phone);
   const profilePic = await fetchProfilePic(contact);
 
+  const metaUpdate = {
+    chatId,
+    ...(pushName !== undefined ? { pushName } : {}),
+    ...(savedName ? { name: savedName } : {}),
+    ...(profilePic ? { profilePic } : {}),
+    lastActivity: overrides.lastMessageAt ?? new Date(),
+    unreadCount: overrides.unreadCount ?? 0,
+  };
+
+  // When we'd create a lid: lead, first check if any lead already owns this chatId.
+  // This prevents recreating a lid: duplicate for a contact whose real phone was already
+  // resolved by a prior inbound message or a previous sync run with resolvedNumber available.
+  if (phone.startsWith("lid:")) {
+    const existingByChatId = await Lead.findOne({ chatId });
+    if (existingByChatId) {
+      const updated = await Lead.findByIdAndUpdate(existingByChatId._id, { $set: metaUpdate }, { new: true });
+      console.log(`[ChatSync] contact synced (chatId match, no lid: duplicate): ${existingByChatId.phone}`);
+      return updated!;
+    }
+  }
+
   const lead = await Lead.findOneAndUpdate(
     { phone },
     {
-      $set: {
-        chatId,
-        pushName,
-        ...(savedName ? { name: savedName } : {}),
-        profilePic: profilePic ?? undefined,
-        lastActivity: overrides.lastMessageAt ?? new Date(),
-        unreadCount: overrides.unreadCount ?? 0,
-      },
+      $set: metaUpdate,
       $setOnInsert: {
         phone,
         source: "whatsapp",
@@ -164,6 +179,13 @@ export async function syncContact(
     },
     { new: true, upsert: true }
   );
+
+  // When we have a real phone and an @lid chatId, merge any orphaned lid: lead
+  // (same pattern as inbound.ts — handles the case where a lid: lead was created by
+  // a previous sync run before the phone was resolved).
+  if (!phone.startsWith("lid:") && chatId.endsWith("@lid")) {
+    reconcileLidSibling(lead._id.toString(), chatId).catch(console.warn);
+  }
 
   console.log(`[ChatSync] contact synced: ${displayName} (${phone})`);
   return lead;
@@ -252,13 +274,14 @@ export async function syncAllChats(
   client: IWajsClient,
   opts: { messageLimit?: number } = {}
 ) {
-  // Try to acquire distributed lock for 5 minutes
-  const lock = await redisConnection.set("sync_lock:whatsapp", "locked", "EX", 300, "NX");
+  // Try to acquire distributed lock for 30 minutes (large accounts with thousands of chats can exceed 5 min)
+  const lock = await redisConnection.set("sync_lock:whatsapp", "locked", "EX", 1800, "NX");
   if (!lock) {
     console.warn("[HistorySync] Sync aborted — another sync is currently running (lock active).");
     return;
   }
 
+  try {
   const msgLimit = opts.messageLimit ?? INITIAL_MSG_LIMIT;
   console.log("[HistorySync] Sync started");
   emitRealtime("sync:started", { at: new Date().toISOString() });
@@ -272,8 +295,7 @@ export async function syncAllChats(
   } catch (err) {
     console.error("[HistorySync] getChats() failed — aborting sync:", err);
     emitRealtime("sync:error", { error: String(err) });
-    await redisConnection.del("sync_lock:whatsapp");
-    return;
+    return; // lock released by finally block below
   }
 
   console.log(`[HistorySync] Found ${chats.length} chats`);
@@ -307,12 +329,6 @@ export async function syncAllChats(
       const cAny = chat as any;
       const pushName = cAny.pushname || cAny.formattedTitle || chat.name;
 
-      // For @lid chats: use "lid:<numericId>" as the phone key.
-      // For normal chats: use the number before the "@" suffix.
-      const phoneKey = isLid
-        ? `lid:${contactId!.split("@")[0]}`
-        : (contactId ? contactId.split("@")[0] : "unknown");
-
       let waContact: any = null;
       try {
         waContact = await chat.getContact();
@@ -320,8 +336,27 @@ export async function syncAllChats(
         console.warn(`[ChatSync] Failed to get contact for ${contactId}`);
       }
 
+      // Prefer the real phone number from the contact object when available.
+      // waContact.number is a plain digit string (e.g. "243202674167887") when WhatsApp
+      // resolves the underlying number for an @lid chat. Only trust it if it looks like a
+      // real number: non-empty and not itself an @lid or @c.us identifier.
+      const resolvedNumber =
+        waContact?.number &&
+        !waContact.number.endsWith("@lid") &&
+        !waContact.number.endsWith("@c.us")
+          ? waContact.number
+          : null;
+
+      // Fall back to lid: synthetic key only when no real number is available.
+      // For @c.us chats the contactId already contains the plain digits.
+      const phoneKey = resolvedNumber
+        ? resolvedNumber
+        : isLid
+          ? `lid:${contactId!.split("@")[0]}`
+          : (contactId ? contactId.split("@")[0] : "unknown");
+
       const contact: WajsContact = {
-        number: phoneKey,
+        number: phoneKey,   // syncContact() calls normalizePhone(contact.number)
         pushname: waContact?.pushname || pushName,
         name: waContact?.name || chat.name,
         isMyContact: waContact?.isMyContact || false,
@@ -431,8 +466,6 @@ export async function syncAllChats(
     `[HistorySync] Sync complete — ${done}/${privateChats.length} chats, ${errors.length} errors`
   );
 
-  await redisConnection.del("sync_lock:whatsapp");
-
   // Final document counts for verification
   try {
     const [convCount, msgCount] = await Promise.all([
@@ -450,4 +483,7 @@ export async function syncAllChats(
     errors,
     at: new Date().toISOString(),
   });
+  } finally {
+    await redisConnection.del("sync_lock:whatsapp").catch(console.warn);
+  }
 }

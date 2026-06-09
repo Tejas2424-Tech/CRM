@@ -30,7 +30,6 @@ import { ProcessedEvent } from "../models/ProcessedEvent.js";
 import { Task } from "../models/Task.js";
 import {
   automationQueue,
-  campaignQueue,
   inboundQueue,
   outboundQueue,
   statusQueue,
@@ -125,7 +124,6 @@ adminRouter.post("/reset-crm", async (req, res) => {
     await Promise.allSettled([
       inboundQueue.obliterate({ force: true }),
       outboundQueue.obliterate({ force: true }),
-      campaignQueue.obliterate({ force: true }),
       statusQueue.obliterate({ force: true }),
       automationQueue.obliterate({ force: true }),
     ]);

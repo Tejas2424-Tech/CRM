@@ -1,5 +1,6 @@
 import type { WhatsAppWebhookMessage } from "@crm/shared";
 import { env } from "../config/env.js";
+import { normalizePhone } from "../utils/phone.js";
 import { getWajsClient } from "../services/whatsappWebjs.service.js";
 
 export interface SendTextPayload {
@@ -14,6 +15,8 @@ export interface SendTemplatePayload {
   templateName: string;
   language: string;
   variables?: Record<string, string>;
+  /** Resolved template body — used by WaJsAdapter as plain-text fallback */
+  body?: string;
 }
 
 export interface WhatsAppAdapter {
@@ -40,7 +43,11 @@ export class MockWhatsAppAdapter implements WhatsAppAdapter {
         const value = change.value;
         for (const message of value?.messages ?? []) {
           const contact = value?.contacts?.find((item: any) => item.wa_id === message.from);
-          
+
+          // Meta sends phone as plain digits without "+"; normalize to E.164 for consistent Lead keys.
+          const phone = normalizePhone(message.from);
+          if (!phone) continue; // skip entries with unparseable sender IDs
+
           let text = message.text?.body || "";
           if (!text && message.interactive?.button_reply?.title) {
             text = message.interactive.button_reply.title;
@@ -50,7 +57,7 @@ export class MockWhatsAppAdapter implements WhatsAppAdapter {
 
           parsed.push({
             waMessageId: message.id,
-            phone: message.from,
+            phone,
             name: contact?.profile?.name,
             text,
             timestamp: message.timestamp ? new Date(Number(message.timestamp) * 1000).toISOString() : undefined
@@ -160,9 +167,10 @@ export class WaJsAdapter implements WhatsAppAdapter {
   }
 
   async sendTemplateMessage(payload: SendTemplatePayload): Promise<{ waMessageId: string }> {
-    // whatsapp-web.js has no BSP template support — send as plain text
-    const fallbackText = `[${payload.templateName}]`;
-    return this.sendTextMessage({ phone: payload.phone, chatId: payload.chatId, text: fallbackText });
+    // whatsapp-web.js has no BSP template support — send as plain text using the
+    // resolved body when available, falling back to [template_name] only as a last resort.
+    const text = payload.body || `[${payload.templateName}]`;
+    return this.sendTextMessage({ phone: payload.phone, chatId: payload.chatId, text });
   }
 
   // Not used in webjs mode — inbound comes via event listener, not webhook

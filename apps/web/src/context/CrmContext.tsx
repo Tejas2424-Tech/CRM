@@ -5,6 +5,8 @@ import { useInbox } from "../hooks/useInbox";
 import { useTasks } from "../hooks/useTasks";
 import { useWhatsApp } from "../hooks/useWhatsApp";
 import { useAnalytics } from "../hooks/useAnalytics";
+import { useFollowupPlans } from "../hooks/useFollowupPlans";
+import { useBulkCampaigns } from "../hooks/useBulkCampaigns";
 import { useSocket } from "../hooks/useSocket";
 import { api } from "../api";
 
@@ -15,6 +17,8 @@ type InboxContextType = ReturnType<typeof useInbox>;
 type TasksContextType = ReturnType<typeof useTasks>;
 type WhatsAppContextType = ReturnType<typeof useWhatsApp>;
 type AnalyticsContextType = ReturnType<typeof useAnalytics>;
+type FollowupPlansContextType = ReturnType<typeof useFollowupPlans>;
+type BulkCampaignsContextType = ReturnType<typeof useBulkCampaigns>;
 
 interface CrmContextType {
   auth: AuthContextType;
@@ -23,6 +27,8 @@ interface CrmContextType {
   tasks: TasksContextType;
   whatsapp: WhatsAppContextType;
   analytics: AnalyticsContextType;
+  followupPlans: FollowupPlansContextType;
+  campaigns: BulkCampaignsContextType;
   resetCrm: () => Promise<void>;
   crmResetState: string;
   globalError?: string;
@@ -38,13 +44,15 @@ export function CrmProvider({ children }: { children: React.ReactNode }) {
   const auth = useAuth();
   const leads = useLeads(auth.session);
   const inbox = useInbox(
-    auth.session, 
-    leads.selectedLeadId, 
+    auth.session,
+    leads.selectedLeadId,
     (id) => leads.updateLead(leads.leads.find(l => l.id === id)!, { unreadCount: 0 })
   );
   const tasks = useTasks(auth.session, leads.filters, leads.selectedLeadId);
   const whatsapp = useWhatsApp(auth.session);
   const analytics = useAnalytics(auth.session, auth.canManage);
+  const followupPlans = useFollowupPlans(auth.session);
+  const campaigns = useBulkCampaigns(auth.session);
 
   // Wire socket events to the correct stores
   const socketEvents = [
@@ -52,6 +60,8 @@ export function CrmProvider({ children }: { children: React.ReactNode }) {
     ...inbox.socketEvents,
     ...tasks.socketEvents,
     ...whatsapp.socketEvents,
+    ...followupPlans.socketEvents,
+    ...campaigns.socketEvents,
     {
       event: "crm:reset",
       handler: (p: any) => {
@@ -76,7 +86,9 @@ export function CrmProvider({ children }: { children: React.ReactNode }) {
     if (inbox.error) setGlobalError(inbox.error);
     if (tasks.error) setGlobalError(tasks.error);
     if (whatsapp.error) setGlobalError(whatsapp.error);
-  }, [auth.error, leads.error, inbox.error, tasks.error, whatsapp.error]);
+    if (followupPlans.error) setGlobalError(followupPlans.error);
+    if (campaigns.error) setGlobalError(campaigns.error);
+  }, [auth.error, leads.error, inbox.error, tasks.error, whatsapp.error, followupPlans.error, campaigns.error]);
 
   const resetCrm = async () => {
     if (!auth.session || crmResetState !== "idle") return;
@@ -104,6 +116,8 @@ export function CrmProvider({ children }: { children: React.ReactNode }) {
         tasks,
         whatsapp,
         analytics,
+        followupPlans,
+        campaigns,
         resetCrm,
         crmResetState,
         globalError,

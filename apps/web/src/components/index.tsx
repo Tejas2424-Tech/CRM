@@ -87,7 +87,7 @@ export function LeadLine({ lead, agents }: { lead: LeadDTO; agents: AgentDTO[] }
 
 // ─── Message bubble ───────────────────────────────────────────────────────────
 
-export function MessageBubble({ message }: { message: MessageDTO }) {
+export function MessageBubble({ message, onRetry }: { message: MessageDTO; onRetry?: (id: string) => void }) {
   const statusLabel = ({ queued: "SENDING...", retrying: "RETRYING...", sent: "SENT", delivered: "DELIVERED", read: "READ", failed: "FAILED" } as Record<string, string>)[message.status] ?? message.status;
   const statusColor = ({ queued: "#f39c12", retrying: "#e67e22", sent: "#2ecc71", delivered: "#3498db", read: "#9b59b6", failed: "#e74c3c" } as Record<string, string>)[message.status] ?? "#666";
 
@@ -103,6 +103,18 @@ export function MessageBubble({ message }: { message: MessageDTO }) {
             </span>
           )}
         </small>
+        {message.status === "failed" && onRetry && (
+          <button
+            onClick={() => onRetry(message.id)}
+            style={{
+              marginTop: 4, padding: "2px 8px", fontSize: "0.65rem", fontWeight: 700,
+              background: "transparent", color: "#e74c3c", border: "1px solid #e74c3c",
+              borderRadius: 4, cursor: "pointer", display: "block"
+            }}
+          >
+            ↺ Retry
+          </button>
+        )}
       </div>
     </div>
   );

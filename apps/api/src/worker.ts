@@ -1,12 +1,14 @@
 import { Worker } from "bullmq";
 import { connectDatabase } from "./config/db.js";
 import { redisConnection, publisher, createRedisConnection } from "./queues/connection.js";
-import type { CampaignRecipientJob, InboundJob, LostLeadsJob, StatusJob } from "./queues/jobs.js";
-import { lostLeadsQueue } from "./queues/jobs.js";
+import type { CampaignRecipientJob, FollowupStepJob, InboundJob, LostLeadsJob, StatusJob } from "./queues/jobs.js";
+import { campaignQueue, followupQueue, lostLeadsQueue } from "./queues/jobs.js";
 import { runAutomation } from "./services/automation.js";
+import { processFollowupStep } from "./services/followup.js";
 import { processInboundMessage } from "./services/inbound.js";
 import { recomputeLostLeads } from "./services/leadClassifier.service.js";
-import { sendCampaignRecipient, updateMessageStatus } from "./services/outbound.js";
+import { checkScheduledCampaigns, processCampaignRecipient } from "./services/campaigns.js";
+import { updateMessageStatus } from "./services/outbound.js";
 
 await connectDatabase();
 
@@ -19,18 +21,35 @@ await connectDatabase();
 // so getWajsClient() can reach the live _client singleton.
 const workers = [
   new Worker<InboundJob>("process-inbound-message", (job) => processInboundMessage(job.data), { connection: createRedisConnection() }),
-  new Worker<CampaignRecipientJob>("send-campaign-recipient", (job) => sendCampaignRecipient(job.data.campaignId, job.data.recipientId), { connection: createRedisConnection() }),
   new Worker<StatusJob>("simulate-message-status", (job) => updateMessageStatus(job.data), { connection: createRedisConnection() }),
   new Worker<InboundJob>("run-automation", (job) => runAutomation(job.data), { connection: createRedisConnection() }),
   new Worker<LostLeadsJob>("recompute-lost-leads", async () => {
     await recomputeLostLeads();
-  }, { connection: createRedisConnection() })
+  }, { connection: createRedisConnection() }),
+  new Worker<FollowupStepJob>("followup-steps", (job) => processFollowupStep(job.data), {
+    connection: createRedisConnection(),
+    concurrency: 5
+  }),
+  new Worker<CampaignRecipientJob>(
+    "process-campaign-recipient",
+    async (job) => {
+      if (job.name === "check-scheduled") return checkScheduledCampaigns();
+      return processCampaignRecipient(job.data);
+    },
+    { connection: createRedisConnection(), concurrency: 5 }
+  )
 ];
 
 // Schedule the daily lost-leads scan (idempotent — BullMQ deduplicates by repeat key)
 lostLeadsQueue.add("daily-lost-check", {}, {
   repeat: { pattern: "0 2 * * *" } // 2 AM daily
 }).catch((err) => console.error("[Worker][LostLeads] Failed to schedule repeatable job:", err));
+
+// Schedule the per-minute check for campaigns with sendAt in the past
+campaignQueue.add("check-scheduled", {} as CampaignRecipientJob, {
+  repeat: { pattern: "* * * * *" },
+  jobId: "scheduled-campaign-check"
+}).catch((err) => console.error("[Worker][Campaign] Failed to schedule repeatable job:", err));
 
 for (const worker of workers) {
   worker.on("active", (job) => {
@@ -60,6 +79,8 @@ async function shutdown(signal: string) {
   console.log(`[Worker] ${signal} received. Closing workers...`);
   await Promise.allSettled(workers.map((worker) => worker.close()));
   await lostLeadsQueue.close().catch(() => undefined);
+  await followupQueue.close().catch(() => undefined);
+  await campaignQueue.close().catch(() => undefined);
   await publisher.quit().catch(() => undefined);
   await redisConnection.quit().catch(() => undefined);
   process.exit(0);

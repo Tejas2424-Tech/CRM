@@ -34,6 +34,7 @@ export function useInbox(session: Session | undefined, selectedLeadId: string | 
     let cancelled = false;
     // Always reset messages when switching leads, then populate from API
     setMessages([]);
+    setError(undefined);
     api
       .messages(session.token, leadId)
       .then((fetched) => {
@@ -73,6 +74,16 @@ export function useInbox(session: Session | undefined, selectedLeadId: string | 
     }
   }, [session, selectedLeadId, reply, markLeadUnreadAsZero]);
 
+  const retryMessage = useCallback(async (messageId: string) => {
+    if (!session) return;
+    try {
+      const result = await api.retryMessage(session.token, messageId);
+      setMessages((prev) => mergeUniqueMessages(prev, [result.message]));
+    } catch (err: any) {
+      setError(err.message ?? "Failed to retry message");
+    }
+  }, [session]);
+
   const createNote = useCallback(async () => {
     if (!session || !selectedLeadId || !noteBody.trim()) return;
     try {
@@ -110,6 +121,14 @@ export function useInbox(session: Session | undefined, selectedLeadId: string | 
           loadMessages(selectedLeadId).catch((err) => setError(err.message));
         },
       },
+      {
+        // When the full sync finishes, reload messages for the open conversation
+        // so the chat view reflects all newly synced history immediately.
+        event: "sync:complete",
+        handler: () => {
+          if (selectedLeadId) loadMessages(selectedLeadId).catch((err) => setError(err.message));
+        },
+      },
     ],
     [loadMessages, selectedLeadId]
   );
@@ -122,6 +141,7 @@ export function useInbox(session: Session | undefined, selectedLeadId: string | 
     noteBody,
     setNoteBody,
     sendReply,
+    retryMessage,
     createNote,
     socketEvents,
     error,

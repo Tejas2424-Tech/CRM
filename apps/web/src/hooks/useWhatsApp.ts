@@ -3,7 +3,7 @@ import { api, type Session } from "../api";
 
 export type SyncState = { status: "idle" | "syncing" | "done"; done: number; total: number };
 
-export function useWhatsApp(session?: Session) {
+export function useWhatsApp(session?: Session, onSyncComplete?: () => void) {
   const [waStatus, setWaStatus] = useState<string>("UNKNOWN");
   const [waMetadata, setWaMetadata] = useState<Record<string, any>>({});
   const [waQr, setWaQr] = useState<string | null>(null);
@@ -50,6 +50,7 @@ export function useWhatsApp(session?: Session) {
     setWaLogoutLoading(true);
     try {
       await api.logoutWhatsApp(session.token);
+      setWaLogoutLoading(false);
     } catch (err: unknown) {
       setError((err as Error).message);
       setWaLogoutLoading(false);
@@ -106,6 +107,7 @@ export function useWhatsApp(session?: Session) {
         event: "sync:complete",
         handler: (p: any) => {
           setSyncState({ status: "done", ...(p as { total: number; done: number }) });
+          onSyncComplete?.();
         },
       },
       {
@@ -142,7 +144,7 @@ export function useWhatsApp(session?: Session) {
         },
       },
     ],
-    []
+    [onSyncComplete]
   );
 
   return {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LeadDTO } from "@crm/shared";
 import { api, type Session } from "../api";
 import { uniqueById } from "../utils";
@@ -11,19 +11,22 @@ export function useLeads(session?: Session) {
   const [selectedLeadId, setSelectedLeadId] = useState<string>();
   const [filters, setFilters] = useState<FilterState>({ search: "", status: "", tag: "", assignedTo: "", unread: "" });
   const [leadForm, setLeadForm] = useState({ name: "", phone: "", email: "" });
+  const loadGenRef = useRef(0);
   const [error, setError] = useState<string>();
 
   const loadLeads = useCallback(() => {
     if (!session) return;
+    const gen = ++loadGenRef.current;
     setIsLeadsLoading(true);
     api
       .leads(session.token, filters)
       .then((items) => {
+        if (gen !== loadGenRef.current) return;
         setLeads(uniqueById(items));
         setSelectedLeadId((cur) => cur ?? items[0]?.id);
       })
-      .catch((err) => setError(err.message))
-      .finally(() => setIsLeadsLoading(false));
+      .catch((err) => { if (gen === loadGenRef.current) setError(err.message); })
+      .finally(() => { if (gen === loadGenRef.current) setIsLeadsLoading(false); });
   }, [session, filters]);
 
   useEffect(() => {
@@ -66,30 +69,38 @@ export function useLeads(session?: Session) {
     () => [
       {
         event: "lead:new",
-        handler: (lead: any) =>
+        handler: (lead: any) => {
+          const incoming = lead as LeadDTO;
+          // Agents only own their assigned leads — drop updates for others
+          if (session?.user.role === "agent" && incoming.assignedTo !== session.user.id) return;
           setLeads((items) => {
-            const others = items.filter((i) => i.id !== (lead as LeadDTO).id);
-            return [lead as LeadDTO, ...others].sort((a, b) => {
+            const others = items.filter((i) => i.id !== incoming.id);
+            return [incoming, ...others].sort((a, b) => {
               const aTime = a.lastActivity ? new Date(a.lastActivity).getTime() : 0;
               const bTime = b.lastActivity ? new Date(b.lastActivity).getTime() : 0;
               return bTime - aTime;
             });
-          }),
+          });
+        },
       },
       {
         event: "lead:update",
-        handler: (lead: any) =>
+        handler: (lead: any) => {
+          const incoming = lead as LeadDTO;
+          // Agents only own their assigned leads — drop updates for others
+          if (session?.user.role === "agent" && incoming.assignedTo !== session.user.id) return;
           setLeads((items) => {
-            const others = items.filter((i) => i.id !== lead.id);
-            return [lead, ...others].sort((a, b) => {
+            const others = items.filter((i) => i.id !== incoming.id);
+            return [incoming, ...others].sort((a, b) => {
               const aTime = a.lastActivity ? new Date(a.lastActivity).getTime() : 0;
               const bTime = b.lastActivity ? new Date(b.lastActivity).getTime() : 0;
               return bTime - aTime;
             });
-          }),
+          });
+        },
       },
     ],
-    []
+    [session?.user.role, session?.user.id]
   );
 
   return {

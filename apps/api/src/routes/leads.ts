@@ -1,12 +1,13 @@
 import { Router } from "express";
 import { z } from "zod";
 import { requireAuth, requireRole } from "../auth/auth.js";
+import { AuditLog } from "../models/AuditLog.js";
 import { Lead } from "../models/Lead.js";
 import { Message } from "../models/Message.js";
 import { Note } from "../models/Note.js";
 import { Task } from "../models/Task.js";
 import { audit } from "../services/audit.js";
-import { serializeLead, serializeNote, serializeTask } from "../services/serializers.js";
+import { serializeLead, serializeMessage, serializeNote, serializeTask } from "../services/serializers.js";
 import { emitRealtime } from "../config/realtime.js";
 
 export const leadsRouter = Router();
@@ -19,12 +20,24 @@ leadsRouter.get("/", async (req, res) => {
     if (typeof req.query[key] === "string" && req.query[key]) filter[key] = req.query[key];
   }
   if (typeof req.query.tag === "string" && req.query.tag) filter.tags = req.query.tag;
-  if (typeof req.query.search === "string" && req.query.search) filter.$text = { $search: req.query.search };
+  if (typeof req.query.search === "string" && req.query.search.trim()) {
+    const term = req.query.search.trim();
+    const digits = term.replace(/\D/g, "");
+    const orClauses: Record<string, unknown>[] = [
+      { name: { $regex: term, $options: "i" } },
+      { pushName: { $regex: term, $options: "i" } },
+    ];
+    if (digits.length >= 3) orClauses.push({ phone: { $regex: digits } });
+    filter.$or = orClauses;
+  }
   if (req.query.unread === "true") filter.unreadCount = { $gt: 0 };
   if (typeof req.query.lastActivityAfter === "string") filter.lastActivity = { $gte: new Date(req.query.lastActivityAfter) };
   if (req.user?.role === "agent") filter.assignedTo = req.user.id;
 
-  const leads = await Lead.find(filter).sort({ lastActivity: -1 }).limit(200);
+  const rawLimit = typeof req.query.limit === "string" ? parseInt(req.query.limit, 10) : 200;
+  const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 1000) : 200;
+
+  const leads = await Lead.find(filter).sort({ lastActivity: -1 }).limit(limit);
   res.json(leads.map(serializeLead));
 });
 
@@ -39,7 +52,15 @@ leadsRouter.post("/", requireRole("admin", "manager"), async (req, res) => {
     source: z.string().default("manual")
   });
   const body = schema.parse(req.body);
-  const lead = await Lead.create({ ...body, consent: { optedIn: true, source: "manual" }, lastActivity: new Date() });
+  let lead;
+  try {
+    lead = await Lead.create({ ...body, consent: { optedIn: true, source: "manual" }, lastActivity: new Date() });
+  } catch (err: any) {
+    if (err?.code === 11000) {
+      return res.status(409).json({ error: "A contact with this phone number already exists" });
+    }
+    throw err;
+  }
   const dto = serializeLead(lead);
   await audit(req.user!.id, "lead.create", "Lead", lead._id.toString(), undefined, dto);
   emitRealtime("lead:update", dto);
@@ -90,7 +111,7 @@ leadsRouter.delete("/:id", requireRole("admin", "manager"), async (req, res) => 
 
 leadsRouter.get("/:id/messages", async (req, res) => {
   const messages = await Message.find({ leadId: req.params.id }).sort({ timestamp: 1 }).limit(500);
-  res.json(messages);
+  res.json(messages.map(serializeMessage));
 });
 
 leadsRouter.get("/:id/notes", async (req, res) => {
@@ -117,8 +138,8 @@ leadsRouter.post("/:id/tasks", async (req, res) => {
   const schema = z.object({
     title: z.string().min(1),
     description: z.string().optional(),
-    dueAt: z.iso.datetime().optional(),
-    dueDate: z.iso.datetime().optional(), // backward-compat alias
+    dueAt: z.string().datetime().optional(),
+    dueDate: z.string().datetime().optional(), // backward-compat alias
     assignedTo: z.string().optional()
   }).refine((b) => b.dueAt || b.dueDate, { message: "dueAt is required" });
   const body = schema.parse(req.body);
@@ -136,6 +157,9 @@ leadsRouter.post("/:id/tasks", async (req, res) => {
   res.status(201).json(dto);
 });
 
-leadsRouter.get("/:id/activities", async (_req, res) => {
-  res.json([]);
+leadsRouter.get("/:id/activities", async (req, res) => {
+  const logs = await AuditLog.find({ entity: "Lead", entityId: req.params.id })
+    .sort({ ts: -1 })
+    .limit(100);
+  res.json(logs);
 });
