@@ -117,6 +117,7 @@ export async function createCampaign(
   });
 
   if (input.audienceSource === "csv" && input.csvRows?.length) {
+    await dropLegacyCampaignLeadIndex();
     const docs = input.csvRows.map((row) => ({
       campaignId: campaign._id,
       phone: row.phone,
@@ -506,6 +507,26 @@ function buildLeadQuery(filters?: CampaignDocument["filters"]): Record<string, u
   if (filters.source) query.source = filters.source;
   if (filters.tags?.length) query.tags = { $in: filters.tags };
   return query;
+}
+
+async function dropLegacyCampaignLeadIndex(): Promise<void> {
+  const legacyIndexName = "campaignId_1_leadId_1";
+  const indexes = await CampaignRecipient.collection.indexes();
+  const legacyIndex = indexes.find(
+    (index) =>
+      index.name === legacyIndexName &&
+      index.unique === true &&
+      index.key?.campaignId === 1 &&
+      index.key?.leadId === 1
+  );
+
+  if (!legacyIndex) return;
+
+  try {
+    await CampaignRecipient.collection.dropIndex(legacyIndexName);
+  } catch (err: any) {
+    if (err?.codeName !== "IndexNotFound" && err?.code !== 27) throw err;
+  }
 }
 
 async function drainCampaignJobs(campaignId: string): Promise<void> {
